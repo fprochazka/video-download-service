@@ -46,6 +46,7 @@
             font-size: 16px;
             cursor: pointer;
             transition: background-color 0.3s;
+            margin-right: 10px;
         }
         button:hover {
             background-color: #0056b3;
@@ -53,6 +54,15 @@
         button:disabled {
             background-color: #ccc;
             cursor: not-allowed;
+        }
+        button.secondary {
+            background-color: #6c757d;
+        }
+        button.secondary:hover {
+            background-color: #545b62;
+        }
+        button.secondary:disabled {
+            background-color: #ccc;
         }
         .status {
             margin-top: 20px;
@@ -80,16 +90,54 @@
         }
         .metadata {
             margin-top: 15px;
-            padding: 10px;
+            padding: 15px;
             background-color: #f8f9fa;
             border-radius: 4px;
             font-size: 13px;
+            border: 1px solid #dee2e6;
         }
-        .metadata-item {
+        .metadata h3 {
+            margin: 0 0 12px 0;
+            font-size: 14px;
+            color: #495057;
+            font-weight: 600;
+            border-bottom: 1px solid #dee2e6;
+            padding-bottom: 8px;
+        }
+        .metadata-grid {
+            display: grid;
+            grid-template-columns: auto 1fr;
+            gap: 8px 15px;
+            margin-bottom: 15px;
+        }
+        .metadata-key {
+            font-weight: 600;
+            color: #495057;
+            white-space: nowrap;
+        }
+        .metadata-value {
+            color: #212529;
+            word-break: break-word;
+        }
+        .metadata-description {
+            margin-top: 12px;
+            padding-top: 12px;
+            border-top: 1px solid #dee2e6;
+        }
+        .metadata-description .metadata-key {
+            display: block;
             margin-bottom: 5px;
         }
-        .metadata-item strong {
-            color: #495057;
+        .metadata-description .metadata-value {
+            display: block;
+            max-height: 100px;
+            overflow-y: auto;
+            padding: 8px;
+            background-color: white;
+            border-radius: 3px;
+            border: 1px solid #dee2e6;
+            font-size: 12px;
+            line-height: 1.5;
         }
         .files-list {
             list-style: none;
@@ -136,6 +184,7 @@
                        placeholder="https://www.youtube.com/watch?v=..." />
             </div>
             <button type="submit" id="submitBtn">Download</button>
+            <button type="button" id="cancelBtn" class="secondary" style="display: none;">Cancel</button>
         </form>
 
         <div id="status" class="status"></div>
@@ -145,6 +194,7 @@
         const form = document.getElementById('downloadForm');
         const statusDiv = document.getElementById('status');
         const submitBtn = document.getElementById('submitBtn');
+        const cancelBtn = document.getElementById('cancelBtn');
         const urlInput = document.getElementById('url');
 
         let pollInterval = null;
@@ -159,6 +209,23 @@
 
         function clearDownloadId() {
             localStorage.removeItem('currentDownloadId');
+        }
+
+        function resetUI() {
+            // Stop polling
+            if (pollInterval) {
+                clearInterval(pollInterval);
+                pollInterval = null;
+            }
+
+            // Clear localStorage
+            clearDownloadId();
+
+            // Reset UI
+            statusDiv.className = 'status';
+            statusDiv.innerHTML = '';
+            submitBtn.disabled = false;
+            cancelBtn.style.display = 'none';
         }
 
         async function pollStatus(downloadId) {
@@ -183,6 +250,7 @@
                     }
 
                     statusDiv.innerHTML = `<div><span class="spinner"></span>${message}</div>`;
+                    cancelBtn.style.display = 'inline-block';
                 } else if (status.status === 'completed') {
                     // Stop polling
                     if (pollInterval) {
@@ -191,31 +259,13 @@
                     }
                     clearDownloadId();
                     submitBtn.disabled = false;
+                    cancelBtn.style.display = 'none';
 
                     // Show success with file list
                     statusDiv.className = 'status success';
                     let filesHtml = '<strong>Download completed!</strong>';
 
-                    // Show metadata
-                    filesHtml += '<div class="metadata">';
-                    if (status.title) {
-                        filesHtml += `<div class="metadata-item"><strong>Title:</strong> ${status.title}</div>`;
-                    }
-                    if (status.uploader) {
-                        filesHtml += `<div class="metadata-item"><strong>Uploader:</strong> ${status.uploader}</div>`;
-                    }
-                    if (status.duration) {
-                        const duration = Math.floor(status.duration);
-                        const mins = Math.floor(duration / 60);
-                        const secs = duration % 60;
-                        filesHtml += `<div class="metadata-item"><strong>Duration:</strong> ${mins}:${secs.toString().padStart(2, '0')}</div>`;
-                    }
-                    if (status.view_count) {
-                        filesHtml += `<div class="metadata-item"><strong>Views:</strong> ${status.view_count.toLocaleString()}</div>`;
-                    }
-                    filesHtml += `<div class="metadata-item"><strong>Download ID:</strong> ${status.download_id}</div>`;
-                    filesHtml += '</div>';
-
+                    // File list
                     if (status.files && status.files.length > 0) {
                         filesHtml += '<ul class="files-list">';
                         status.files.forEach(file => {
@@ -223,6 +273,95 @@
                         });
                         filesHtml += '</ul>';
                     }
+
+                    // Show metadata in pretty format
+                    filesHtml += '<div class="metadata">';
+                    filesHtml += '<h3>Video Information</h3>';
+                    filesHtml += '<div class="metadata-grid">';
+
+                    // Format duration helper
+                    function formatDuration(seconds) {
+                        if (!seconds) return null;
+                        const duration = Math.floor(seconds);
+                        const hours = Math.floor(duration / 3600);
+                        const mins = Math.floor((duration % 3600) / 60);
+                        const secs = duration % 60;
+                        if (hours > 0) {
+                            return `${hours}:${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
+                        }
+                        return `${mins}:${secs.toString().padStart(2, '0')}`;
+                    }
+
+                    // Format date helper
+                    function formatDate(dateStr) {
+                        if (!dateStr) return null;
+                        // Handle YYYYMMDD format
+                        if (/^\d{8}$/.test(dateStr)) {
+                            const year = dateStr.substring(0, 4);
+                            const month = dateStr.substring(4, 6);
+                            const day = dateStr.substring(6, 8);
+                            return `${year}-${month}-${day}`;
+                        }
+                        return dateStr;
+                    }
+
+                    // Format number helper
+                    function formatNumber(num) {
+                        if (num === null || num === undefined) return null;
+                        return num.toLocaleString();
+                    }
+
+                    // Define metadata fields to display with their labels
+                    const metadataFields = [
+                        { key: 'title', label: 'Title' },
+                        { key: 'channel', label: 'Channel' },
+                        { key: 'uploader', label: 'Uploader' },
+                        { key: 'duration', label: 'Duration', formatter: formatDuration },
+                        { key: 'upload_date', label: 'Upload Date', formatter: formatDate },
+                        { key: 'view_count', label: 'Views', formatter: formatNumber },
+                        { key: 'like_count', label: 'Likes', formatter: formatNumber },
+                        { key: 'resolution', label: 'Resolution' },
+                        { key: 'format', label: 'Format' },
+                        { key: 'ext', label: 'Extension' },
+                        { key: 'id', label: 'Video ID' },
+                        { key: 'download_id', label: 'Download ID' },
+                        { key: 'created_at', label: 'Started At', formatter: (val) => new Date(val).toLocaleString() },
+                        { key: 'updated_at', label: 'Completed At', formatter: (val) => new Date(val).toLocaleString() }
+                    ];
+
+                    // Render metadata fields
+                    metadataFields.forEach(field => {
+                        let value = status[field.key];
+                        if (value !== null && value !== undefined && value !== '') {
+                            if (field.formatter) {
+                                value = field.formatter(value);
+                            }
+                            if (value !== null && value !== undefined && value !== '') {
+                                filesHtml += `<div class="metadata-key">${field.label}:</div>`;
+                                filesHtml += `<div class="metadata-value">${value}</div>`;
+                            }
+                        }
+                    });
+
+                    filesHtml += '</div>'; // Close metadata-grid
+
+                    // Add description separately if present (it can be long)
+                    if (status.description) {
+                        filesHtml += '<div class="metadata-description">';
+                        filesHtml += '<div class="metadata-key">Description:</div>';
+                        filesHtml += `<div class="metadata-value">${status.description.replace(/\n/g, '<br>')}</div>`;
+                        filesHtml += '</div>';
+                    }
+
+                    // Add webpage URL if present
+                    if (status.webpage_url) {
+                        filesHtml += '<div style="margin-top: 12px; padding-top: 12px; border-top: 1px solid #dee2e6;">';
+                        filesHtml += '<div class="metadata-key" style="display: inline;">Source:</div> ';
+                        filesHtml += `<a href="${status.webpage_url}" target="_blank" style="color: #007bff; text-decoration: none;">${status.webpage_url}</a>`;
+                        filesHtml += '</div>';
+                    }
+
+                    filesHtml += '</div>'; // Close metadata
 
                     statusDiv.innerHTML = filesHtml;
                 } else if (status.status === 'failed') {
@@ -233,6 +372,7 @@
                     }
                     clearDownloadId();
                     submitBtn.disabled = false;
+                    cancelBtn.style.display = 'none';
 
                     // Show error
                     statusDiv.className = 'status error';
@@ -253,6 +393,7 @@
             statusDiv.className = 'status loading';
             statusDiv.innerHTML = '<div><span class="spinner"></span>Initiating download...</div>';
             submitBtn.disabled = true;
+            cancelBtn.style.display = 'inline-block';
 
             try {
                 const formData = new FormData();
@@ -283,7 +424,13 @@
                 statusDiv.className = 'status error';
                 statusDiv.innerHTML = `<strong>Error:</strong> ${error.message}`;
                 submitBtn.disabled = false;
+                cancelBtn.style.display = 'none';
             }
+        });
+
+        // Cancel button handler
+        cancelBtn.addEventListener('click', () => {
+            resetUI();
         });
 
         // On page load, check if there's an ongoing download
@@ -293,6 +440,7 @@
                 statusDiv.className = 'status loading';
                 statusDiv.innerHTML = '<div><span class="spinner"></span>Resuming download status check...</div>';
                 submitBtn.disabled = true;
+                cancelBtn.style.display = 'inline-block';
 
                 // Start polling
                 pollInterval = setInterval(() => pollStatus(downloadId), 5000);

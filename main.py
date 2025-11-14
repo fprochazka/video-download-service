@@ -32,10 +32,24 @@ class DownloadStatus(BaseModel):
     status: str  # pending, downloading, completed, failed
     url: str
     files: List[str] = []
-    metadata: dict | None = None
     error: str | None = None
     created_at: str
     updated_at: str
+    # Video metadata fields (optional)
+    title: str | None = None
+    duration: int | None = None
+    uploader: str | None = None
+    upload_date: str | None = None
+    description: str | None = None
+    ext: str | None = None
+    format: str | None = None
+    resolution: str | None = None
+    thumbnail: str | None = None
+    webpage_url: str | None = None
+    id: str | None = None
+    channel: str | None = None
+    view_count: int | None = None
+    like_count: int | None = None
 
 
 def make_url_safe_filename(filename: str) -> str:
@@ -107,9 +121,14 @@ async def download_video_task(download_id: str, url: str):
 
         # Update metadata with video info
         if info:
+            # Convert duration to int if it's a float
+            duration = info.get('duration')
+            if duration is not None:
+                duration = int(duration)
+
             metadata.update({
                 'title': info.get('title'),
-                'duration': info.get('duration'),
+                'duration': duration,
                 'uploader': info.get('uploader'),
                 'upload_date': info.get('upload_date'),
                 'description': info.get('description'),
