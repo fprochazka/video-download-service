@@ -30,6 +30,8 @@ uv sync
 
 ## Running the Application
 
+### Using UV (Local Development)
+
 Start the server with:
 
 ```bash
@@ -43,6 +45,30 @@ uv run uvicorn main:app --reload --host 0.0.0.0 --port 8000
 ```
 
 The application will be available at: http://localhost:8000
+
+### Using Docker
+
+Build the Docker image:
+
+```bash
+docker build -t video-download .
+```
+
+Run the container:
+
+```bash
+docker run -d -p 8000:8000 -v $(pwd)/downloads:/app/downloads --name video-download video-download
+```
+
+Or using docker-compose (create a `docker-compose.yml` first):
+
+```bash
+docker-compose up -d
+```
+
+The application will be available at: http://localhost:8000
+
+**Note:** The `-v $(pwd)/downloads:/app/downloads` flag mounts the downloads directory so your downloads persist outside the container.
 
 ## Usage
 

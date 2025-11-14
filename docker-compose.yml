@@ -1,0 +1,13 @@
+version: '3.8'
+
+services:
+  video-download:
+    build: .
+    container_name: video-download
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./downloads:/app/downloads
+    restart: unless-stopped
+    environment:
+      - PYTHONUNBUFFERED=1
