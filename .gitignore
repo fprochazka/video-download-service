@@ -23,6 +23,9 @@ downloads/*
 *.env
 !.env.example
 
+# Cookies (contain login sessions)
+cookies.txt
+
 # IDE
 .idea/
 .vscode/

@@ -104,9 +104,19 @@ async def download_video_task(download_id: str, url: str):
             'format': 'best',
             'writethumbnail': False,
             'writeinfojson': False,
-            # Fix for YouTube JS runtime warning
-            'extractor_args': {'youtube': {'player_client': ['android', 'web']}},
+            # Fix for YouTube JS runtime warning and Instagram age-restricted content
+            'extractor_args': {
+                'youtube': {'player_client': ['android', 'web']},
+                'instagram': {
+                    'api': ['graphql'],  # Use GraphQL API for better compatibility
+                }
+            },
         }
+
+        # Add cookies if available (helps with age-restricted Instagram content)
+        cookies_file = Path('cookies.txt')
+        if cookies_file.exists():
+            ydl_opts['cookiefile'] = str(cookies_file)
 
         # First, extract info without downloading to get metadata
         info = None

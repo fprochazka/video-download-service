@@ -150,6 +150,35 @@ docker logs ts-video-download
 - **UUID-based access control** - Each download directory uses a unique identifier
 - **Download ID persistence** - Stored in browser localStorage, survives page reloads
 
+### Handling Age-Restricted/Private Content
+
+Some platforms (like Instagram) may block downloads for age-restricted or private content with errors like:
+```
+ERROR: [Instagram]: This content may be inappropriate: It's unavailable for certain audiences.
+```
+
+**Solution: Use cookies from a logged-in session**
+
+1. **Export cookies from your browser:**
+   - Install a browser extension like "Get cookies.txt LOCALLY" (Chrome/Firefox)
+   - Log into Instagram (or the platform) in your browser
+   - Use the extension to export cookies in Netscape format
+   - Save the file as `cookies.txt`
+
+2. **Add cookies to the application:**
+   - Place `cookies.txt` in the project root directory
+   - The application will automatically use it if present
+   - For Docker: mount it as a volume in `docker-compose.yml`:
+     ```yaml
+     volumes:
+       - ./downloads:/app/downloads
+       - ./cookies.txt:/app/cookies.txt:ro
+     ```
+
+3. **Restart the application** to apply changes
+
+**Note:** Cookies contain your login session. Keep `cookies.txt` private and add it to `.gitignore`.
+
 ## Directory Structure
 
 ```
