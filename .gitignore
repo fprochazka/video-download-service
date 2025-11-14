@@ -15,8 +15,8 @@ build/
 .venv
 
 # Application specific
-downloads/
-temp/
+downloads/*
+!downloads/.gitignore
 
 # IDE
 .idea/

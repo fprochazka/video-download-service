@@ -1,23 +1,22 @@
 import asyncio
-import hashlib
-import os
+import json
+import re
 import shutil
+import uuid
 from pathlib import Path
 from typing import List
 
 import yt_dlp
 from fastapi import FastAPI, Form, HTTPException
-from fastapi.responses import HTMLResponse, FileResponse
+from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 app = FastAPI(title="Video Download Service")
 
-# Create directories for downloads and temp work
+# Create downloads directory
 DOWNLOADS_DIR = Path("downloads")
-TEMP_DIR = Path("temp")
 DOWNLOADS_DIR.mkdir(exist_ok=True)
-TEMP_DIR.mkdir(exist_ok=True)
 
 # Mount downloads directory for serving files
 app.mount("/downloads", StaticFiles(directory=str(DOWNLOADS_DIR)), name="downloads")
@@ -25,198 +24,29 @@ app.mount("/downloads", StaticFiles(directory=str(DOWNLOADS_DIR)), name="downloa
 
 class DownloadResult(BaseModel):
     url: str
+    download_id: str
     files: List[str]
+    metadata: dict | None = None
     error: str | None = None
+
+
+def make_url_safe_filename(filename: str) -> str:
+    """Convert filename to URL-safe format"""
+    # Remove or replace problematic characters
+    filename = re.sub(r'[^\w\s\-.]', '_', filename)
+    # Replace multiple spaces/underscores with single underscore
+    filename = re.sub(r'[\s_]+', '_', filename)
+    # Remove leading/trailing underscores and dots
+    filename = filename.strip('_.')
+    return filename
 
 
 @app.get("/", response_class=HTMLResponse)
 async def index():
     """Serve the main page with download form"""
-    html_content = """
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <title>Video Download Service</title>
-        <style>
-            body {
-                font-family: Arial, sans-serif;
-                max-width: 800px;
-                margin: 50px auto;
-                padding: 20px;
-                background-color: #f5f5f5;
-            }
-            .container {
-                background-color: white;
-                padding: 30px;
-                border-radius: 8px;
-                box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-            }
-            h1 {
-                color: #333;
-                margin-bottom: 30px;
-            }
-            .form-group {
-                margin-bottom: 20px;
-            }
-            label {
-                display: block;
-                margin-bottom: 8px;
-                font-weight: bold;
-                color: #555;
-            }
-            input[type="url"] {
-                width: 100%;
-                padding: 10px;
-                border: 1px solid #ddd;
-                border-radius: 4px;
-                font-size: 14px;
-                box-sizing: border-box;
-            }
-            button {
-                background-color: #007bff;
-                color: white;
-                padding: 12px 30px;
-                border: none;
-                border-radius: 4px;
-                font-size: 16px;
-                cursor: pointer;
-                transition: background-color 0.3s;
-            }
-            button:hover {
-                background-color: #0056b3;
-            }
-            button:disabled {
-                background-color: #ccc;
-                cursor: not-allowed;
-            }
-            .status {
-                margin-top: 20px;
-                padding: 15px;
-                border-radius: 4px;
-                display: none;
-            }
-            .status.loading {
-                display: block;
-                background-color: #fff3cd;
-                color: #856404;
-                border: 1px solid #ffeaa7;
-            }
-            .status.success {
-                display: block;
-                background-color: #d4edda;
-                color: #155724;
-                border: 1px solid #c3e6cb;
-            }
-            .status.error {
-                display: block;
-                background-color: #f8d7da;
-                color: #721c24;
-                border: 1px solid #f5c6cb;
-            }
-            .files-list {
-                list-style: none;
-                padding: 0;
-                margin-top: 15px;
-            }
-            .files-list li {
-                padding: 10px;
-                margin-bottom: 8px;
-                background-color: #f8f9fa;
-                border-radius: 4px;
-                border-left: 3px solid #007bff;
-            }
-            .files-list a {
-                color: #007bff;
-                text-decoration: none;
-                font-weight: 500;
-            }
-            .files-list a:hover {
-                text-decoration: underline;
-            }
-            .spinner {
-                display: inline-block;
-                width: 14px;
-                height: 14px;
-                border: 2px solid #856404;
-                border-radius: 50%;
-                border-top-color: transparent;
-                animation: spin 1s linear infinite;
-                margin-right: 8px;
-            }
-            @keyframes spin {
-                to { transform: rotate(360deg); }
-            }
-        </style>
-    </head>
-    <body>
-        <div class="container">
-            <h1>Video Download Service</h1>
-            <form id="downloadForm">
-                <div class="form-group">
-                    <label for="url">Video URL:</label>
-                    <input type="url" id="url" name="url" required
-                           placeholder="https://www.youtube.com/watch?v=..." />
-                </div>
-                <button type="submit" id="submitBtn">Download</button>
-            </form>
-
-            <div id="status" class="status"></div>
-        </div>
-
-        <script>
-            const form = document.getElementById('downloadForm');
-            const statusDiv = document.getElementById('status');
-            const submitBtn = document.getElementById('submitBtn');
-            const urlInput = document.getElementById('url');
-
-            form.addEventListener('submit', async (e) => {
-                e.preventDefault();
-
-                const url = urlInput.value.trim();
-                if (!url) return;
-
-                // Show loading state
-                statusDiv.className = 'status loading';
-                statusDiv.innerHTML = '<div><span class="spinner"></span>Downloading video, please wait...</div>';
-                submitBtn.disabled = true;
-
-                try {
-                    const formData = new FormData();
-                    formData.append('url', url);
-
-                    const response = await fetch('/download', {
-                        method: 'POST',
-                        body: formData
-                    });
-
-                    const result = await response.json();
-
-                    if (response.ok && result.files && result.files.length > 0) {
-                        // Show success with file list
-                        statusDiv.className = 'status success';
-                        let filesHtml = '<strong>Download completed!</strong>';
-                        filesHtml += '<ul class="files-list">';
-                        result.files.forEach(file => {
-                            filesHtml += `<li><a href="/downloads/${file}" download>${file}</a></li>`;
-                        });
-                        filesHtml += '</ul>';
-                        statusDiv.innerHTML = filesHtml;
-                    } else {
-                        // Show error
-                        statusDiv.className = 'status error';
-                        statusDiv.innerHTML = `<strong>Error:</strong> ${result.error || 'Download failed'}`;
-                    }
-                } catch (error) {
-                    statusDiv.className = 'status error';
-                    statusDiv.innerHTML = `<strong>Error:</strong> ${error.message}`;
-                } finally {
-                    submitBtn.disabled = false;
-                }
-            });
-        </script>
-    </body>
-    </html>
-    """
+    template_path = Path(__file__).parent / 'templates' / 'index.html'
+    with open(template_path, 'r', encoding='utf-8') as f:
+        html_content = f.read()
     return HTMLResponse(content=html_content)
 
 
@@ -224,64 +54,127 @@ async def index():
 async def download_video(url: str = Form(...)):
     """Download video from URL using yt-dlp"""
 
-    # Create a unique working directory for this download
-    url_hash = hashlib.md5(url.encode()).hexdigest()[:8]
-    work_dir = TEMP_DIR / url_hash
-    work_dir.mkdir(exist_ok=True)
+    # Create a unique download ID
+    download_id = str(uuid.uuid4())
+    download_dir = DOWNLOADS_DIR / download_id
+    download_dir.mkdir(exist_ok=True)
 
     try:
         # Configure yt-dlp options
         ydl_opts = {
-            'outtmpl': str(work_dir / '%(title)s.%(ext)s'),
-            'quiet': False,
-            'no_warnings': False,
+            'outtmpl': str(download_dir / '%(title)s.%(ext)s'),
+            'quiet': True,
+            'no_warnings': True,
             'format': 'best',
+            'writethumbnail': False,
+            'writeinfojson': False,
+            # Fix for YouTube JS runtime warning
+            'extractor_args': {'youtube': {'player_client': ['android', 'web']}},
         }
+
+        # First, extract info without downloading to get metadata
+        metadata = None
+        info = None
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            loop = asyncio.get_event_loop()
+            info = await loop.run_in_executor(
+                None,
+                ydl.extract_info,
+                url,
+                False
+            )
 
         # Download the video
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            await asyncio.get_event_loop().run_in_executor(
+            loop = asyncio.get_event_loop()
+            await loop.run_in_executor(
                 None,
-                lambda: ydl.download([url])
+                ydl.download,
+                [url]
             )
 
-        # Get list of downloaded files
+        # Save metadata to JSON
+        if info:
+            metadata = {
+                'url': url,
+                'download_id': download_id,
+                'title': info.get('title'),
+                'duration': info.get('duration'),
+                'uploader': info.get('uploader'),
+                'upload_date': info.get('upload_date'),
+                'description': info.get('description'),
+                'ext': info.get('ext'),
+                'format': info.get('format'),
+                'resolution': info.get('resolution'),
+                'thumbnail': info.get('thumbnail'),
+                'webpage_url': info.get('webpage_url'),
+                'id': info.get('id'),
+                'channel': info.get('channel'),
+                'view_count': info.get('view_count'),
+                'like_count': info.get('like_count'),
+            }
+
+            metadata_file = download_dir / 'metadata.json'
+            with open(metadata_file, 'w', encoding='utf-8') as f:
+                json.dump(metadata, f, indent=2, ensure_ascii=False)
+
+        # Get list of downloaded files and rename them to be URL-safe
         downloaded_files = []
-        for file_path in work_dir.iterdir():
-            if file_path.is_file():
-                # Move file to downloads directory
-                dest_path = DOWNLOADS_DIR / file_path.name
+        for file_path in download_dir.iterdir():
+            if file_path.is_file() and file_path.name != 'metadata.json':
+                # Make filename URL-safe
+                safe_name = make_url_safe_filename(file_path.name)
 
-                # Handle duplicate filenames
-                counter = 1
-                original_stem = file_path.stem
-                original_suffix = file_path.suffix
-                while dest_path.exists():
-                    dest_path = DOWNLOADS_DIR / f"{original_stem}_{counter}{original_suffix}"
-                    counter += 1
+                # Rename if needed
+                if safe_name != file_path.name:
+                    new_path = download_dir / safe_name
+                    # Handle conflicts
+                    counter = 1
+                    while new_path.exists():
+                        stem = Path(safe_name).stem
+                        suffix = Path(safe_name).suffix
+                        new_path = download_dir / f"{stem}_{counter}{suffix}"
+                        safe_name = new_path.name
+                        counter += 1
 
-                shutil.move(str(file_path), str(dest_path))
-                downloaded_files.append(dest_path.name)
+                    file_path.rename(new_path)
+                    file_path = new_path
 
-        # Clean up temp directory
-        shutil.rmtree(work_dir, ignore_errors=True)
+                downloaded_files.append(file_path.name)
 
         if not downloaded_files:
             raise HTTPException(status_code=500, detail="No files were downloaded")
 
-        return DownloadResult(url=url, files=downloaded_files)
+        return DownloadResult(
+            url=url,
+            download_id=download_id,
+            files=downloaded_files,
+            metadata=metadata if info else None
+        )
 
     except Exception as e:
         # Clean up on error
-        shutil.rmtree(work_dir, ignore_errors=True)
-        return DownloadResult(url=url, files=[], error=str(e))
+        import shutil
+        shutil.rmtree(download_dir, ignore_errors=True)
+        return DownloadResult(url=url, download_id=download_id, files=[], error=str(e))
 
 
 @app.get("/files")
 async def list_files():
-    """List all downloaded files"""
-    files = [f.name for f in DOWNLOADS_DIR.iterdir() if f.is_file()]
-    return {"files": files}
+    """List all downloads"""
+    downloads = []
+    for download_dir in DOWNLOADS_DIR.iterdir():
+        if download_dir.is_dir():
+            metadata_file = download_dir / 'metadata.json'
+            if metadata_file.exists():
+                with open(metadata_file, 'r', encoding='utf-8') as f:
+                    metadata = json.load(f)
+                    downloads.append({
+                        'download_id': download_dir.name,
+                        'title': metadata.get('title'),
+                        'url': metadata.get('url')
+                    })
+    return {"downloads": downloads}
 
 
 if __name__ == "__main__":

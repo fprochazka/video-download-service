@@ -1,0 +1,219 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Video Download Service</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 800px;
+            margin: 50px auto;
+            padding: 20px;
+            background-color: #f5f5f5;
+        }
+        .container {
+            background-color: white;
+            padding: 30px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        h1 {
+            color: #333;
+            margin-bottom: 30px;
+        }
+        .form-group {
+            margin-bottom: 20px;
+        }
+        label {
+            display: block;
+            margin-bottom: 8px;
+            font-weight: bold;
+            color: #555;
+        }
+        input[type="url"] {
+            width: 100%;
+            padding: 10px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            font-size: 14px;
+            box-sizing: border-box;
+        }
+        button {
+            background-color: #007bff;
+            color: white;
+            padding: 12px 30px;
+            border: none;
+            border-radius: 4px;
+            font-size: 16px;
+            cursor: pointer;
+            transition: background-color 0.3s;
+        }
+        button:hover {
+            background-color: #0056b3;
+        }
+        button:disabled {
+            background-color: #ccc;
+            cursor: not-allowed;
+        }
+        .status {
+            margin-top: 20px;
+            padding: 15px;
+            border-radius: 4px;
+            display: none;
+        }
+        .status.loading {
+            display: block;
+            background-color: #fff3cd;
+            color: #856404;
+            border: 1px solid #ffeaa7;
+        }
+        .status.success {
+            display: block;
+            background-color: #d4edda;
+            color: #155724;
+            border: 1px solid #c3e6cb;
+        }
+        .status.error {
+            display: block;
+            background-color: #f8d7da;
+            color: #721c24;
+            border: 1px solid #f5c6cb;
+        }
+        .metadata {
+            margin-top: 15px;
+            padding: 10px;
+            background-color: #f8f9fa;
+            border-radius: 4px;
+            font-size: 13px;
+        }
+        .metadata-item {
+            margin-bottom: 5px;
+        }
+        .metadata-item strong {
+            color: #495057;
+        }
+        .files-list {
+            list-style: none;
+            padding: 0;
+            margin-top: 15px;
+        }
+        .files-list li {
+            padding: 10px;
+            margin-bottom: 8px;
+            background-color: #f8f9fa;
+            border-radius: 4px;
+            border-left: 3px solid #007bff;
+        }
+        .files-list a {
+            color: #007bff;
+            text-decoration: none;
+            font-weight: 500;
+        }
+        .files-list a:hover {
+            text-decoration: underline;
+        }
+        .spinner {
+            display: inline-block;
+            width: 14px;
+            height: 14px;
+            border: 2px solid #856404;
+            border-radius: 50%;
+            border-top-color: transparent;
+            animation: spin 1s linear infinite;
+            margin-right: 8px;
+        }
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Video Download Service</h1>
+        <form id="downloadForm">
+            <div class="form-group">
+                <label for="url">Video URL:</label>
+                <input type="url" id="url" name="url" required
+                       placeholder="https://www.youtube.com/watch?v=..." />
+            </div>
+            <button type="submit" id="submitBtn">Download</button>
+        </form>
+
+        <div id="status" class="status"></div>
+    </div>
+
+    <script>
+        const form = document.getElementById('downloadForm');
+        const statusDiv = document.getElementById('status');
+        const submitBtn = document.getElementById('submitBtn');
+        const urlInput = document.getElementById('url');
+
+        form.addEventListener('submit', async (e) => {
+            e.preventDefault();
+
+            const url = urlInput.value.trim();
+            if (!url) return;
+
+            // Show loading state
+            statusDiv.className = 'status loading';
+            statusDiv.innerHTML = '<div><span class="spinner"></span>Downloading video, please wait...</div>';
+            submitBtn.disabled = true;
+
+            try {
+                const formData = new FormData();
+                formData.append('url', url);
+
+                const response = await fetch('/download', {
+                    method: 'POST',
+                    body: formData
+                });
+
+                const result = await response.json();
+
+                if (response.ok && result.files && result.files.length > 0) {
+                    // Show success with file list
+                    statusDiv.className = 'status success';
+                    let filesHtml = '<strong>Download completed!</strong>';
+
+                    // Show metadata if available
+                    if (result.metadata) {
+                        filesHtml += '<div class="metadata">';
+                        if (result.metadata.title) {
+                            filesHtml += `<div class="metadata-item"><strong>Title:</strong> ${result.metadata.title}</div>`;
+                        }
+                        if (result.metadata.uploader) {
+                            filesHtml += `<div class="metadata-item"><strong>Uploader:</strong> ${result.metadata.uploader}</div>`;
+                        }
+                        if (result.metadata.duration) {
+                            const duration = Math.floor(result.metadata.duration);
+                            const mins = Math.floor(duration / 60);
+                            const secs = duration % 60;
+                            filesHtml += `<div class="metadata-item"><strong>Duration:</strong> ${mins}:${secs.toString().padStart(2, '0')}</div>`;
+                        }
+                        if (result.metadata.view_count) {
+                            filesHtml += `<div class="metadata-item"><strong>Views:</strong> ${result.metadata.view_count.toLocaleString()}</div>`;
+                        }
+                        filesHtml += `<div class="metadata-item"><strong>Download ID:</strong> ${result.download_id}</div>`;
+                        filesHtml += '</div>';
+                    }
+
+                    filesHtml += '<ul class="files-list">';
+                    result.files.forEach(file => {
+                        filesHtml += `<li><a href="/downloads/${result.download_id}/${file}" download>${file}</a></li>`;
+                    });
+                    filesHtml += '</ul>';
+                    statusDiv.innerHTML = filesHtml;
+                } else {
+                    // Show error
+                    statusDiv.className = 'status error';
+                    statusDiv.innerHTML = `<strong>Error:</strong> ${result.error || 'Download failed'}`;
+                }
+            } catch (error) {
+                statusDiv.className = 'status error';
+                statusDiv.innerHTML = `<strong>Error:</strong> ${error.message}`;
+            } finally {
+                submitBtn.disabled = false;
+            }
+        });
+    </script>
+</body>
+</html>
