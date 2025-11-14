@@ -72,13 +72,67 @@ The application will be available at: http://localhost:8000
 
 ### Using Tailscale (Secure Remote Access)
 
-To access your service securely over Tailscale network with HTTPS:
+Access your service securely over Tailscale network with automatic HTTPS.
 
-1. Copy `.env.example` to `.env` and add your Tailscale auth key
-2. Run `docker-compose up -d` (includes Tailscale sidecar)
-3. Access via `https://video-download.your-tailnet.ts.net`
+#### Setup
 
-See [TAILSCALE.md](TAILSCALE.md) for detailed setup instructions.
+1. **Get Tailscale auth key:**
+   - Go to https://login.tailscale.com/admin/settings/keys
+   - Click "Generate auth key"
+   - Configure: Reusable=Yes, Ephemeral=No, Tags=`tag:service`
+   - Copy the generated key
+
+2. **Create `.env` file:**
+   ```bash
+   cp .env.example .env
+   ```
+   Add your auth key to `.env`:
+   ```
+   TS_AUTHKEY=tskey-auth-XXXXXXXXXXXXXXXX-XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
+   ```
+
+3. **Start services:**
+   ```bash
+   docker-compose up -d
+   ```
+   This starts both the app and Tailscale sidecar.
+
+4. **Find your hostname:**
+   Check https://login.tailscale.com/admin/machines for:
+   ```
+   video-download.your-tailnet-name.ts.net
+   ```
+
+5. **Access securely:**
+   ```
+   https://video-download.your-tailnet-name.ts.net
+   ```
+
+#### Architecture
+
+```
+Tailscale Network → HTTPS (443) → ts-video-download → HTTP (8000) → video-download app
+```
+
+- Automatic HTTPS with valid certificates
+- Private access (only Tailscale users)
+- No port forwarding needed
+
+#### Troubleshooting
+
+**Container won't start:** Check `/dev/net/tun` exists or load module:
+```bash
+sudo modprobe tun
+```
+
+**Can't connect:** Check logs:
+```bash
+docker logs ts-video-download
+```
+
+**Access from other devices:** Install Tailscale on phone/tablet, sign in, access the URL.
+
+**Enable public access (Funnel):** Edit `ts-video-download/config/mcp.json` and set `"AllowFunnel": true`
 
 ## Usage
 
