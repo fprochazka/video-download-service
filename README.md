@@ -60,7 +60,7 @@ Run the container:
 docker run -d -p 8000:8000 -v $(pwd)/downloads:/app/downloads --name video-download video-download
 ```
 
-Or using docker-compose (create a `docker-compose.yml` first):
+Or using docker-compose:
 
 ```bash
 docker-compose up -d
@@ -69,6 +69,16 @@ docker-compose up -d
 The application will be available at: http://localhost:8000
 
 **Note:** The `-v $(pwd)/downloads:/app/downloads` flag mounts the downloads directory so your downloads persist outside the container.
+
+### Using Tailscale (Secure Remote Access)
+
+To access your service securely over Tailscale network with HTTPS:
+
+1. Copy `.env.example` to `.env` and add your Tailscale auth key
+2. Run `docker-compose up -d` (includes Tailscale sidecar)
+3. Access via `https://video-download.your-tailnet.ts.net`
+
+See [TAILSCALE.md](TAILSCALE.md) for detailed setup instructions.
 
 ## Usage
 

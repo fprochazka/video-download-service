@@ -18,6 +18,11 @@ build/
 downloads/*
 !downloads/.gitignore
 
+# Environment variables and secrets
+.env
+*.env
+!.env.example
+
 # IDE
 .idea/
 .vscode/
