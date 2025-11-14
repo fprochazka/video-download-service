@@ -10,7 +10,7 @@ services:
       - "8000"
     volumes:
       - ./downloads:/app/downloads
-      - ./cookies.txt:/app/cookies.txt:ro
+      - ./cookies.txt:/app/cookies.txt
     restart: unless-stopped
     environment:
       - PYTHONUNBUFFERED=1
