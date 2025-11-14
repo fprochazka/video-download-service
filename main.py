@@ -3,7 +3,7 @@ import json
 import re
 import shutil
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import List
 
@@ -77,8 +77,8 @@ async def download_video_task(download_id: str, url: str):
             'status': 'downloading',
             'files': [],
             'error': None,
-            'created_at': datetime.utcnow().isoformat(),
-            'updated_at': datetime.utcnow().isoformat(),
+            'created_at': datetime.now(timezone.utc).isoformat(),
+            'updated_at': datetime.now(timezone.utc).isoformat(),
         }
         save_metadata(download_dir, metadata)
 
@@ -123,7 +123,7 @@ async def download_video_task(download_id: str, url: str):
                 'view_count': info.get('view_count'),
                 'like_count': info.get('like_count'),
             })
-            metadata['updated_at'] = datetime.utcnow().isoformat()
+            metadata['updated_at'] = datetime.now(timezone.utc).isoformat()
             save_metadata(download_dir, metadata)
 
         # Download the video
