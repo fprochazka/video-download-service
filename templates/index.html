@@ -147,15 +147,111 @@
         const submitBtn = document.getElementById('submitBtn');
         const urlInput = document.getElementById('url');
 
+        let pollInterval = null;
+
+        function saveDownloadId(downloadId) {
+            localStorage.setItem('currentDownloadId', downloadId);
+        }
+
+        function getDownloadId() {
+            return localStorage.getItem('currentDownloadId');
+        }
+
+        function clearDownloadId() {
+            localStorage.removeItem('currentDownloadId');
+        }
+
+        async function pollStatus(downloadId) {
+            try {
+                const response = await fetch(`/status/${downloadId}`);
+
+                if (!response.ok) {
+                    throw new Error('Failed to get status');
+                }
+
+                const status = await response.json();
+
+                // Update UI based on status
+                if (status.status === 'pending' || status.status === 'downloading') {
+                    statusDiv.className = 'status loading';
+                    let message = status.status === 'pending' ?
+                        'Preparing download...' :
+                        'Downloading video...';
+
+                    if (status.title) {
+                        message += `<br><small>${status.title}</small>`;
+                    }
+
+                    statusDiv.innerHTML = `<div><span class="spinner"></span>${message}</div>`;
+                } else if (status.status === 'completed') {
+                    // Stop polling
+                    if (pollInterval) {
+                        clearInterval(pollInterval);
+                        pollInterval = null;
+                    }
+                    clearDownloadId();
+                    submitBtn.disabled = false;
+
+                    // Show success with file list
+                    statusDiv.className = 'status success';
+                    let filesHtml = '<strong>Download completed!</strong>';
+
+                    // Show metadata
+                    filesHtml += '<div class="metadata">';
+                    if (status.title) {
+                        filesHtml += `<div class="metadata-item"><strong>Title:</strong> ${status.title}</div>`;
+                    }
+                    if (status.uploader) {
+                        filesHtml += `<div class="metadata-item"><strong>Uploader:</strong> ${status.uploader}</div>`;
+                    }
+                    if (status.duration) {
+                        const duration = Math.floor(status.duration);
+                        const mins = Math.floor(duration / 60);
+                        const secs = duration % 60;
+                        filesHtml += `<div class="metadata-item"><strong>Duration:</strong> ${mins}:${secs.toString().padStart(2, '0')}</div>`;
+                    }
+                    if (status.view_count) {
+                        filesHtml += `<div class="metadata-item"><strong>Views:</strong> ${status.view_count.toLocaleString()}</div>`;
+                    }
+                    filesHtml += `<div class="metadata-item"><strong>Download ID:</strong> ${status.download_id}</div>`;
+                    filesHtml += '</div>';
+
+                    if (status.files && status.files.length > 0) {
+                        filesHtml += '<ul class="files-list">';
+                        status.files.forEach(file => {
+                            filesHtml += `<li><a href="/downloads/${status.download_id}/${file}" download>${file}</a></li>`;
+                        });
+                        filesHtml += '</ul>';
+                    }
+
+                    statusDiv.innerHTML = filesHtml;
+                } else if (status.status === 'failed') {
+                    // Stop polling
+                    if (pollInterval) {
+                        clearInterval(pollInterval);
+                        pollInterval = null;
+                    }
+                    clearDownloadId();
+                    submitBtn.disabled = false;
+
+                    // Show error
+                    statusDiv.className = 'status error';
+                    statusDiv.innerHTML = `<strong>Error:</strong> ${status.error || 'Download failed'}`;
+                }
+            } catch (error) {
+                console.error('Polling error:', error);
+            }
+        }
+
         form.addEventListener('submit', async (e) => {
             e.preventDefault();
 
             const url = urlInput.value.trim();
             if (!url) return;
 
-            // Show loading state
+            // Show initial loading state
             statusDiv.className = 'status loading';
-            statusDiv.innerHTML = '<div><span class="spinner"></span>Downloading video, please wait...</div>';
+            statusDiv.innerHTML = '<div><span class="spinner"></span>Initiating download...</div>';
             submitBtn.disabled = true;
 
             try {
@@ -167,51 +263,40 @@
                     body: formData
                 });
 
-                const result = await response.json();
-
-                if (response.ok && result.files && result.files.length > 0) {
-                    // Show success with file list
-                    statusDiv.className = 'status success';
-                    let filesHtml = '<strong>Download completed!</strong>';
-
-                    // Show metadata if available
-                    if (result.metadata) {
-                        filesHtml += '<div class="metadata">';
-                        if (result.metadata.title) {
-                            filesHtml += `<div class="metadata-item"><strong>Title:</strong> ${result.metadata.title}</div>`;
-                        }
-                        if (result.metadata.uploader) {
-                            filesHtml += `<div class="metadata-item"><strong>Uploader:</strong> ${result.metadata.uploader}</div>`;
-                        }
-                        if (result.metadata.duration) {
-                            const duration = Math.floor(result.metadata.duration);
-                            const mins = Math.floor(duration / 60);
-                            const secs = duration % 60;
-                            filesHtml += `<div class="metadata-item"><strong>Duration:</strong> ${mins}:${secs.toString().padStart(2, '0')}</div>`;
-                        }
-                        if (result.metadata.view_count) {
-                            filesHtml += `<div class="metadata-item"><strong>Views:</strong> ${result.metadata.view_count.toLocaleString()}</div>`;
-                        }
-                        filesHtml += `<div class="metadata-item"><strong>Download ID:</strong> ${result.download_id}</div>`;
-                        filesHtml += '</div>';
-                    }
-
-                    filesHtml += '<ul class="files-list">';
-                    result.files.forEach(file => {
-                        filesHtml += `<li><a href="/downloads/${result.download_id}/${file}" download>${file}</a></li>`;
-                    });
-                    filesHtml += '</ul>';
-                    statusDiv.innerHTML = filesHtml;
-                } else {
-                    // Show error
-                    statusDiv.className = 'status error';
-                    statusDiv.innerHTML = `<strong>Error:</strong> ${result.error || 'Download failed'}`;
+                if (!response.ok) {
+                    throw new Error('Failed to initiate download');
                 }
+
+                const result = await response.json();
+                const downloadId = result.download_id;
+
+                // Save download ID
+                saveDownloadId(downloadId);
+
+                // Start polling for status every 5 seconds
+                pollInterval = setInterval(() => pollStatus(downloadId), 5000);
+
+                // Also poll immediately
+                pollStatus(downloadId);
+
             } catch (error) {
                 statusDiv.className = 'status error';
                 statusDiv.innerHTML = `<strong>Error:</strong> ${error.message}`;
-            } finally {
                 submitBtn.disabled = false;
+            }
+        });
+
+        // On page load, check if there's an ongoing download
+        window.addEventListener('load', () => {
+            const downloadId = getDownloadId();
+            if (downloadId) {
+                statusDiv.className = 'status loading';
+                statusDiv.innerHTML = '<div><span class="spinner"></span>Resuming download status check...</div>';
+                submitBtn.disabled = true;
+
+                // Start polling
+                pollInterval = setInterval(() => pollStatus(downloadId), 5000);
+                pollStatus(downloadId);
             }
         });
     </script>
