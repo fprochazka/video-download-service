@@ -4,7 +4,10 @@ services:
   video-download:
     build: .
     container_name: video-download
-    network_mode: host
+    networks:
+      - video-download-network
+    expose:
+      - "8000"
     volumes:
       - ./downloads:/app/downloads
     restart: unless-stopped
@@ -13,13 +16,15 @@ services:
 
   ts-video-download:
     image: tailscale/tailscale:latest
-    hostname: video-download
     env_file:
       - .env
     environment:
+      - TS_HOSTNAME=video-download
       - TS_EXTRA_ARGS=--advertise-tags=tag:service
       - TS_STATE_DIR=/var/lib/tailscale
       - TS_SERVE_CONFIG=/config/mcp.json
+    networks:
+      - video-download-network
     volumes:
       - tailscale-data-video-download:/var/lib/tailscale
       - ./ts-video-download/config:/config
@@ -29,8 +34,10 @@ services:
       - net_admin
       - sys_module
     restart: unless-stopped
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
+
+networks:
+  video-download-network:
+    driver: bridge
 
 volumes:
   tailscale-data-video-download:

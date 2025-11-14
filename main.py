@@ -162,7 +162,7 @@ async def download_video_task(download_id: str, url: str):
         # Update metadata with completion status
         metadata['status'] = 'completed'
         metadata['files'] = downloaded_files
-        metadata['updated_at'] = datetime.utcnow().isoformat()
+        metadata['updated_at'] = datetime.now(timezone.utc).isoformat()
         save_metadata(download_dir, metadata)
 
     except Exception as e:
@@ -171,7 +171,7 @@ async def download_video_task(download_id: str, url: str):
         metadata.update({
             'status': 'failed',
             'error': str(e),
-            'updated_at': datetime.utcnow().isoformat(),
+            'updated_at': datetime.now(timezone.utc).isoformat(),
         })
         save_metadata(download_dir, metadata)
 
@@ -201,8 +201,8 @@ async def download_video(url: str = Form(...), background_tasks: BackgroundTasks
         'status': 'pending',
         'files': [],
         'error': None,
-        'created_at': datetime.utcnow().isoformat(),
-        'updated_at': datetime.utcnow().isoformat(),
+        'created_at': datetime.now(timezone.utc).isoformat(),
+        'updated_at': datetime.now(timezone.utc).isoformat(),
     }
     save_metadata(download_dir, metadata)
 
