@@ -1,6 +1,8 @@
 <!DOCTYPE html>
 <html>
 <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Video Download Service</title>
     <style>
         body {
@@ -171,6 +173,71 @@
         }
         @keyframes spin {
             to { transform: rotate(360deg); }
+        }
+
+        /* Mobile responsive styles */
+        @media (max-width: 768px) {
+            body {
+                margin: 20px auto;
+                padding: 15px;
+            }
+            .container {
+                padding: 20px;
+            }
+            h1 {
+                font-size: 24px;
+                margin-bottom: 20px;
+            }
+            button {
+                padding: 10px 20px;
+                font-size: 14px;
+                width: 100%;
+                margin-right: 0;
+                margin-bottom: 10px;
+            }
+            button.secondary {
+                margin-bottom: 0;
+            }
+            input[type="url"] {
+                font-size: 16px; /* Prevents zoom on iOS */
+            }
+            .metadata-grid {
+                grid-template-columns: 1fr;
+                gap: 5px;
+            }
+            .metadata-key {
+                font-weight: 600;
+                margin-top: 10px;
+            }
+            .metadata-key:first-child {
+                margin-top: 0;
+            }
+            .metadata-value {
+                margin-bottom: 5px;
+            }
+            .files-list li {
+                padding: 12px;
+                font-size: 14px;
+            }
+            .metadata {
+                font-size: 12px;
+            }
+            .metadata h3 {
+                font-size: 13px;
+            }
+        }
+
+        @media (max-width: 480px) {
+            body {
+                margin: 10px auto;
+                padding: 10px;
+            }
+            .container {
+                padding: 15px;
+            }
+            h1 {
+                font-size: 20px;
+            }
         }
     </style>
 </head>
