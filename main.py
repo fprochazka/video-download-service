@@ -1,7 +1,9 @@
 import asyncio
 import json
+import logging
 import re
 import shutil
+import traceback
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -12,6 +14,13 @@ from fastapi import BackgroundTasks, FastAPI, Form, HTTPException
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Video Download Service")
 
@@ -194,12 +203,62 @@ async def download_video_task(download_id: str, url: str):
         metadata['updated_at'] = datetime.now(timezone.utc).isoformat()
         save_metadata(download_dir, metadata)
 
-    except Exception as e:
-        # Update metadata with error status
+    except yt_dlp.utils.DownloadError as e:
+        # yt-dlp specific download error
+        error_msg = str(e)
+        # Extract the actual error message from yt-dlp's format
+        if 'ERROR:' in error_msg:
+            error_msg = error_msg.split('ERROR:', 1)[1].strip()
+
+        # Log full error details
+        logger.error(f"Download failed for {download_id}: {error_msg}", exc_info=True)
+
+        # Save clean error message for API
         metadata = load_metadata(download_dir) or {}
         metadata.update({
             'status': 'failed',
-            'error': str(e),
+            'error': f"Download error: {error_msg}",
+            'updated_at': datetime.now(timezone.utc).isoformat(),
+        })
+        save_metadata(download_dir, metadata)
+    except yt_dlp.utils.ExtractorError as e:
+        # yt-dlp extractor error (e.g., video unavailable, age-restricted)
+        error_msg = str(e)
+        if 'ERROR:' in error_msg:
+            error_msg = error_msg.split('ERROR:', 1)[1].strip()
+
+        # Log full error details
+        logger.error(f"Extraction failed for {download_id}: {error_msg}", exc_info=True)
+
+        # Save clean error message for API
+        metadata = load_metadata(download_dir) or {}
+        metadata.update({
+            'status': 'failed',
+            'error': f"Video extraction error: {error_msg}",
+            'updated_at': datetime.now(timezone.utc).isoformat(),
+        })
+        save_metadata(download_dir, metadata)
+    except Exception as e:
+        # Generic error - capture full details
+        error_type = type(e).__name__
+        error_msg = str(e)
+
+        # For some exceptions, str(e) might be empty or unhelpful
+        if not error_msg or error_msg == '':
+            error_msg = f"{error_type} occurred"
+
+        # Log full error with traceback for debugging
+        logger.error(
+            f"Unexpected error for {download_id} ({error_type}): {error_msg}",
+            exc_info=True,
+            extra={'download_id': download_id, 'url': url}
+        )
+
+        # Save user-friendly error message for API
+        metadata = load_metadata(download_dir) or {}
+        metadata.update({
+            'status': 'failed',
+            'error': f"Download failed: {error_msg}",
             'updated_at': datetime.now(timezone.utc).isoformat(),
         })
         save_metadata(download_dir, metadata)
