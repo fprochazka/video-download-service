@@ -2,34 +2,28 @@ import asyncio
 import json
 import logging
 import re
-import shutil
-import traceback
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import List
 
 import yt_dlp
 from fastapi import BackgroundTasks, FastAPI, Form, HTTPException
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 # Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="Video Download Service")
+app = FastAPI(title='Video Download Service')
 
 # Create downloads directory
-DOWNLOADS_DIR = Path("downloads")
+DOWNLOADS_DIR = Path('downloads')
 DOWNLOADS_DIR.mkdir(exist_ok=True)
 
 # Mount downloads directory for serving files
-app.mount("/downloads", StaticFiles(directory=str(DOWNLOADS_DIR)), name="downloads")
+app.mount('/downloads', StaticFiles(directory=str(DOWNLOADS_DIR)), name='downloads')
 
 
 class DownloadInitResponse(BaseModel):
@@ -40,7 +34,7 @@ class DownloadStatus(BaseModel):
     download_id: str
     status: str  # pending, downloading, completed, failed
     url: str
-    files: List[str] = []
+    files: list[str] = []
     error: str | None = None
     created_at: str
     updated_at: str
@@ -83,7 +77,7 @@ def load_metadata(download_dir: Path) -> dict | None:
     """Load metadata from JSON file"""
     metadata_file = download_dir / 'metadata.json'
     if metadata_file.exists():
-        with open(metadata_file, 'r', encoding='utf-8') as f:
+        with open(metadata_file, encoding='utf-8') as f:
             return json.load(f)
     return None
 
@@ -108,8 +102,8 @@ async def download_video_task(download_id: str, url: str):
             'status': 'downloading',
             'files': [],
             'error': None,
-            'created_at': datetime.now(timezone.utc).isoformat(),
-            'updated_at': datetime.now(timezone.utc).isoformat(),
+            'created_at': datetime.now(UTC).isoformat(),
+            'updated_at': datetime.now(UTC).isoformat(),
         }
         save_metadata(download_dir, metadata)
 
@@ -132,7 +126,7 @@ async def download_video_task(download_id: str, url: str):
                 'youtube': {'player_client': ['android', 'web']},
                 'instagram': {
                     'api': ['graphql'],  # Use GraphQL API for better compatibility
-                }
+                },
             },
         }
 
@@ -148,11 +142,12 @@ async def download_video_task(download_id: str, url: str):
         # Load custom extractor configuration if available
         try:
             from extractor_config import EXTRACTOR_ARGS, YTDLP_OPTS
+
             # Merge custom extractor args
             ydl_opts['extractor_args'].update(EXTRACTOR_ARGS)
             # Merge custom ytdlp options
             ydl_opts.update(YTDLP_OPTS)
-            logger.info(f"Loaded custom extractor configuration for {download_id}")
+            logger.info(f'Loaded custom extractor configuration for {download_id}')
         except ImportError:
             # No custom config, use defaults
             pass
@@ -166,12 +161,7 @@ async def download_video_task(download_id: str, url: str):
         info = None
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             loop = asyncio.get_event_loop()
-            info = await loop.run_in_executor(
-                None,
-                ydl.extract_info,
-                url,
-                False
-            )
+            info = await loop.run_in_executor(None, ydl.extract_info, url, False)
 
         # Update metadata with video info
         if info:
@@ -180,33 +170,31 @@ async def download_video_task(download_id: str, url: str):
             if duration is not None:
                 duration = int(duration)
 
-            metadata.update({
-                'title': info.get('title'),
-                'duration': duration,
-                'uploader': info.get('uploader'),
-                'upload_date': info.get('upload_date'),
-                'description': info.get('description'),
-                'ext': info.get('ext'),
-                'format': info.get('format'),
-                'resolution': info.get('resolution'),
-                'thumbnail': info.get('thumbnail'),
-                'webpage_url': info.get('webpage_url'),
-                'id': info.get('id'),
-                'channel': info.get('channel'),
-                'view_count': info.get('view_count'),
-                'like_count': info.get('like_count'),
-            })
-            metadata['updated_at'] = datetime.now(timezone.utc).isoformat()
+            metadata.update(
+                {
+                    'title': info.get('title'),
+                    'duration': duration,
+                    'uploader': info.get('uploader'),
+                    'upload_date': info.get('upload_date'),
+                    'description': info.get('description'),
+                    'ext': info.get('ext'),
+                    'format': info.get('format'),
+                    'resolution': info.get('resolution'),
+                    'thumbnail': info.get('thumbnail'),
+                    'webpage_url': info.get('webpage_url'),
+                    'id': info.get('id'),
+                    'channel': info.get('channel'),
+                    'view_count': info.get('view_count'),
+                    'like_count': info.get('like_count'),
+                }
+            )
+            metadata['updated_at'] = datetime.now(UTC).isoformat()
             save_metadata(download_dir, metadata)
 
         # Download the video
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             loop = asyncio.get_event_loop()
-            await loop.run_in_executor(
-                None,
-                ydl.download,
-                [url]
-            )
+            await loop.run_in_executor(None, ydl.download, [url])
 
         # Get list of downloaded files and rename them to be URL-safe
         downloaded_files = []
@@ -223,7 +211,7 @@ async def download_video_task(download_id: str, url: str):
                     while new_path.exists():
                         stem = Path(safe_name).stem
                         suffix = Path(safe_name).suffix
-                        new_path = download_dir / f"{stem}_{counter}{suffix}"
+                        new_path = download_dir / f'{stem}_{counter}{suffix}'
                         safe_name = new_path.name
                         counter += 1
 
@@ -235,7 +223,7 @@ async def download_video_task(download_id: str, url: str):
         # Update metadata with completion status
         metadata['status'] = 'completed'
         metadata['files'] = downloaded_files
-        metadata['updated_at'] = datetime.now(timezone.utc).isoformat()
+        metadata['updated_at'] = datetime.now(UTC).isoformat()
         save_metadata(download_dir, metadata)
 
         # Clean up yt-dlp logger to prevent memory leaks
@@ -249,15 +237,17 @@ async def download_video_task(download_id: str, url: str):
             error_msg = error_msg.split('ERROR:', 1)[1].strip()
 
         # Log full error details
-        logger.error(f"Download failed for {download_id}: {error_msg}", exc_info=True)
+        logger.error(f'Download failed for {download_id}: {error_msg}', exc_info=True)
 
         # Save clean error message for API
         metadata = load_metadata(download_dir) or {}
-        metadata.update({
-            'status': 'failed',
-            'error': f"Download error: {error_msg}",
-            'updated_at': datetime.now(timezone.utc).isoformat(),
-        })
+        metadata.update(
+            {
+                'status': 'failed',
+                'error': f'Download error: {error_msg}',
+                'updated_at': datetime.now(UTC).isoformat(),
+            }
+        )
         save_metadata(download_dir, metadata)
 
         # Clean up yt-dlp logger to prevent memory leaks
@@ -269,15 +259,17 @@ async def download_video_task(download_id: str, url: str):
             error_msg = error_msg.split('ERROR:', 1)[1].strip()
 
         # Log full error details
-        logger.error(f"Extraction failed for {download_id}: {error_msg}", exc_info=True)
+        logger.error(f'Extraction failed for {download_id}: {error_msg}', exc_info=True)
 
         # Save clean error message for API
         metadata = load_metadata(download_dir) or {}
-        metadata.update({
-            'status': 'failed',
-            'error': f"Video extraction error: {error_msg}",
-            'updated_at': datetime.now(timezone.utc).isoformat(),
-        })
+        metadata.update(
+            {
+                'status': 'failed',
+                'error': f'Video extraction error: {error_msg}',
+                'updated_at': datetime.now(UTC).isoformat(),
+            }
+        )
         save_metadata(download_dir, metadata)
 
         # Clean up yt-dlp logger to prevent memory leaks
@@ -289,38 +281,40 @@ async def download_video_task(download_id: str, url: str):
 
         # For some exceptions, str(e) might be empty or unhelpful
         if not error_msg or error_msg == '':
-            error_msg = f"{error_type} occurred"
+            error_msg = f'{error_type} occurred'
 
         # Log full error with traceback for debugging
         logger.error(
-            f"Unexpected error for {download_id} ({error_type}): {error_msg}",
+            f'Unexpected error for {download_id} ({error_type}): {error_msg}',
             exc_info=True,
-            extra={'download_id': download_id, 'url': url}
+            extra={'download_id': download_id, 'url': url},
         )
 
         # Save user-friendly error message for API
         metadata = load_metadata(download_dir) or {}
-        metadata.update({
-            'status': 'failed',
-            'error': f"Download failed: {error_msg}",
-            'updated_at': datetime.now(timezone.utc).isoformat(),
-        })
+        metadata.update(
+            {
+                'status': 'failed',
+                'error': f'Download failed: {error_msg}',
+                'updated_at': datetime.now(UTC).isoformat(),
+            }
+        )
         save_metadata(download_dir, metadata)
 
         # Clean up yt-dlp logger to prevent memory leaks
         cleanup_ytdlp_logger(download_id)
 
 
-@app.get("/", response_class=HTMLResponse)
+@app.get('/', response_class=HTMLResponse)
 async def index():
     """Serve the main page with download form"""
     template_path = Path(__file__).parent / 'templates' / 'index.html'
-    with open(template_path, 'r', encoding='utf-8') as f:
+    with open(template_path, encoding='utf-8') as f:
         html_content = f.read()
     return HTMLResponse(content=html_content)
 
 
-@app.post("/download")
+@app.post('/download')
 async def download_video(url: str = Form(...), background_tasks: BackgroundTasks = None):
     """Initiate video download and return UUID immediately"""
 
@@ -336,8 +330,8 @@ async def download_video(url: str = Form(...), background_tasks: BackgroundTasks
         'status': 'pending',
         'files': [],
         'error': None,
-        'created_at': datetime.now(timezone.utc).isoformat(),
-        'updated_at': datetime.now(timezone.utc).isoformat(),
+        'created_at': datetime.now(UTC).isoformat(),
+        'updated_at': datetime.now(UTC).isoformat(),
     }
     save_metadata(download_dir, metadata)
 
@@ -347,21 +341,22 @@ async def download_video(url: str = Form(...), background_tasks: BackgroundTasks
     return DownloadInitResponse(download_id=download_id)
 
 
-@app.get("/status/{download_id}")
+@app.get('/status/{download_id}')
 async def get_download_status(download_id: str):
     """Get the status of a download"""
     download_dir = DOWNLOADS_DIR / download_id
 
     if not download_dir.exists():
-        raise HTTPException(status_code=404, detail="Download not found")
+        raise HTTPException(status_code=404, detail='Download not found')
 
     metadata = load_metadata(download_dir)
     if not metadata:
-        raise HTTPException(status_code=404, detail="Metadata not found")
+        raise HTTPException(status_code=404, detail='Metadata not found')
 
     return DownloadStatus(**metadata)
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+
+    uvicorn.run(app, host='0.0.0.0', port=8000)

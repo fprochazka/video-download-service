@@ -28,6 +28,22 @@ A simple web service for downloading videos from various platforms using yt-dlp 
 uv sync
 ```
 
+## Development
+
+This project uses [Ruff](https://github.com/astral-sh/ruff) for code formatting and linting.
+
+**Before committing code changes**, always run:
+
+```bash
+# Check and auto-fix linting issues
+uv run ruff check main.py --fix
+
+# Format code
+uv run ruff format main.py
+```
+
+This ensures consistent code style and catches common issues.
+
 ## Running the Application
 
 ### Using UV (Local Development)
