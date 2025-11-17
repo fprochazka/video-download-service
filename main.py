@@ -88,6 +88,14 @@ def load_metadata(download_dir: Path) -> dict | None:
     return None
 
 
+def cleanup_ytdlp_logger(download_id: str):
+    """Clean up yt-dlp logger to prevent memory leaks"""
+    ytdlp_logger = logging.getLogger(f'yt-dlp.{download_id}')
+    for handler in ytdlp_logger.handlers[:]:
+        handler.close()
+        ytdlp_logger.removeHandler(handler)
+
+
 async def download_video_task(download_id: str, url: str):
     """Background task to download video"""
     download_dir = DOWNLOADS_DIR / download_id
@@ -231,10 +239,7 @@ async def download_video_task(download_id: str, url: str):
         save_metadata(download_dir, metadata)
 
         # Clean up yt-dlp logger to prevent memory leaks
-        ytdlp_logger = logging.getLogger(f'yt-dlp.{download_id}')
-        for handler in ytdlp_logger.handlers[:]:
-            handler.close()
-            ytdlp_logger.removeHandler(handler)
+        cleanup_ytdlp_logger(download_id)
 
     except yt_dlp.utils.DownloadError as e:
         # yt-dlp specific download error
@@ -256,10 +261,7 @@ async def download_video_task(download_id: str, url: str):
         save_metadata(download_dir, metadata)
 
         # Clean up yt-dlp logger to prevent memory leaks
-        ytdlp_logger = logging.getLogger(f'yt-dlp.{download_id}')
-        for handler in ytdlp_logger.handlers[:]:
-            handler.close()
-            ytdlp_logger.removeHandler(handler)
+        cleanup_ytdlp_logger(download_id)
     except yt_dlp.utils.ExtractorError as e:
         # yt-dlp extractor error (e.g., video unavailable, age-restricted)
         error_msg = str(e)
@@ -279,10 +281,7 @@ async def download_video_task(download_id: str, url: str):
         save_metadata(download_dir, metadata)
 
         # Clean up yt-dlp logger to prevent memory leaks
-        ytdlp_logger = logging.getLogger(f'yt-dlp.{download_id}')
-        for handler in ytdlp_logger.handlers[:]:
-            handler.close()
-            ytdlp_logger.removeHandler(handler)
+        cleanup_ytdlp_logger(download_id)
     except Exception as e:
         # Generic error - capture full details
         error_type = type(e).__name__
@@ -309,10 +308,7 @@ async def download_video_task(download_id: str, url: str):
         save_metadata(download_dir, metadata)
 
         # Clean up yt-dlp logger to prevent memory leaks
-        ytdlp_logger = logging.getLogger(f'yt-dlp.{download_id}')
-        for handler in ytdlp_logger.handlers[:]:
-            handler.close()
-            ytdlp_logger.removeHandler(handler)
+        cleanup_ytdlp_logger(download_id)
 
 
 @app.get("/", response_class=HTMLResponse)
