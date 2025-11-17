@@ -179,6 +179,35 @@ ERROR: [Instagram]: This content may be inappropriate: It's unavailable for cert
 
 **Note:** Cookies contain your login session. Keep `cookies.txt` private and add it to `.gitignore`.
 
+### Custom Extractor Configuration
+
+For advanced users who need site-specific tweaks or workarounds:
+
+1. **Copy the example configuration:**
+   ```bash
+   cp extractor_config.example.py extractor_config.py
+   ```
+
+2. **Edit `extractor_config.py`** to add custom extractor arguments or yt-dlp options:
+   ```python
+   EXTRACTOR_ARGS = {
+       'somesite': {
+           'skip': ['hls'],  # Skip HLS formats
+       },
+   }
+
+   YTDLP_OPTS = {
+       'retries': 3,
+       'socket_timeout': 30,
+   }
+   ```
+
+3. **Restart the application** to apply changes
+
+The configuration file is automatically loaded if present. This allows you to fix site-specific issues without modifying the main code.
+
+**Note:** `extractor_config.py` is gitignored to keep your customizations private.
+
 ## Directory Structure
 
 ```

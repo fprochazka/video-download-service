@@ -26,6 +26,9 @@ downloads/*
 # Cookies (contain login sessions)
 cookies.txt
 
+# Custom extractor configuration (may contain site-specific tweaks)
+extractor_config.py
+
 # IDE
 .idea/
 .vscode/

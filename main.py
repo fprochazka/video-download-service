@@ -113,7 +113,7 @@ async def download_video_task(download_id: str, url: str):
             'format': 'best',
             'writethumbnail': False,
             'writeinfojson': False,
-            # Fix for YouTube JS runtime warning and Instagram age-restricted content
+            # Default extractor args
             'extractor_args': {
                 'youtube': {'player_client': ['android', 'web']},
                 'instagram': {
@@ -121,6 +121,18 @@ async def download_video_task(download_id: str, url: str):
                 }
             },
         }
+
+        # Load custom extractor configuration if available
+        try:
+            from extractor_config import EXTRACTOR_ARGS, YTDLP_OPTS
+            # Merge custom extractor args
+            ydl_opts['extractor_args'].update(EXTRACTOR_ARGS)
+            # Merge custom ytdlp options
+            ydl_opts.update(YTDLP_OPTS)
+            logger.info(f"Loaded custom extractor configuration for {download_id}")
+        except ImportError:
+            # No custom config, use defaults
+            pass
 
         # Add cookies if available (helps with age-restricted Instagram content)
         cookies_file = Path('cookies.txt')

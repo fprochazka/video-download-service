@@ -11,6 +11,7 @@ services:
     volumes:
       - ./downloads:/app/downloads
       - ./cookies.txt:/app/cookies.txt
+      - ./extractor_config.py:/app/extractor_config.py:ro
     restart: unless-stopped
     environment:
       - PYTHONUNBUFFERED=1
