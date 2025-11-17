@@ -105,14 +105,20 @@ async def download_video_task(download_id: str, url: str):
         }
         save_metadata(download_dir, metadata)
 
+        # Configure yt-dlp to log to file instead of stdout
+        progress_log = download_dir / 'download.log'
+
         # Configure yt-dlp options
         ydl_opts = {
             'outtmpl': str(download_dir / '%(title)s.%(ext)s'),
-            'quiet': True,
-            'no_warnings': True,
+            'quiet': False,  # Enable output
+            'no_warnings': False,  # Show warnings in log
             'format': 'best',
             'writethumbnail': False,
             'writeinfojson': False,
+            # Log progress to file instead of stdout
+            'progress_hooks': [],  # We'll handle progress differently
+            'logger': logging.getLogger(f'yt-dlp.{download_id}'),
             # Default extractor args
             'extractor_args': {
                 'youtube': {'player_client': ['android', 'web']},
@@ -121,6 +127,15 @@ async def download_video_task(download_id: str, url: str):
                 }
             },
         }
+
+        # Configure file handler for yt-dlp logs
+        ytdlp_logger = logging.getLogger(f'yt-dlp.{download_id}')
+        ytdlp_logger.setLevel(logging.DEBUG)
+        ytdlp_handler = logging.FileHandler(progress_log)
+        ytdlp_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
+        ytdlp_logger.addHandler(ytdlp_handler)
+        # Prevent propagation to root logger
+        ytdlp_logger.propagate = False
 
         # Load custom extractor configuration if available
         try:
@@ -215,6 +230,12 @@ async def download_video_task(download_id: str, url: str):
         metadata['updated_at'] = datetime.now(timezone.utc).isoformat()
         save_metadata(download_dir, metadata)
 
+        # Clean up yt-dlp logger to prevent memory leaks
+        ytdlp_logger = logging.getLogger(f'yt-dlp.{download_id}')
+        for handler in ytdlp_logger.handlers[:]:
+            handler.close()
+            ytdlp_logger.removeHandler(handler)
+
     except yt_dlp.utils.DownloadError as e:
         # yt-dlp specific download error
         error_msg = str(e)
@@ -233,6 +254,12 @@ async def download_video_task(download_id: str, url: str):
             'updated_at': datetime.now(timezone.utc).isoformat(),
         })
         save_metadata(download_dir, metadata)
+
+        # Clean up yt-dlp logger to prevent memory leaks
+        ytdlp_logger = logging.getLogger(f'yt-dlp.{download_id}')
+        for handler in ytdlp_logger.handlers[:]:
+            handler.close()
+            ytdlp_logger.removeHandler(handler)
     except yt_dlp.utils.ExtractorError as e:
         # yt-dlp extractor error (e.g., video unavailable, age-restricted)
         error_msg = str(e)
@@ -250,6 +277,12 @@ async def download_video_task(download_id: str, url: str):
             'updated_at': datetime.now(timezone.utc).isoformat(),
         })
         save_metadata(download_dir, metadata)
+
+        # Clean up yt-dlp logger to prevent memory leaks
+        ytdlp_logger = logging.getLogger(f'yt-dlp.{download_id}')
+        for handler in ytdlp_logger.handlers[:]:
+            handler.close()
+            ytdlp_logger.removeHandler(handler)
     except Exception as e:
         # Generic error - capture full details
         error_type = type(e).__name__
@@ -274,6 +307,12 @@ async def download_video_task(download_id: str, url: str):
             'updated_at': datetime.now(timezone.utc).isoformat(),
         })
         save_metadata(download_dir, metadata)
+
+        # Clean up yt-dlp logger to prevent memory leaks
+        ytdlp_logger = logging.getLogger(f'yt-dlp.{download_id}')
+        for handler in ytdlp_logger.handlers[:]:
+            handler.close()
+            ytdlp_logger.removeHandler(handler)
 
 
 @app.get("/", response_class=HTMLResponse)
