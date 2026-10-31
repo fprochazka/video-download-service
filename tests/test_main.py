@@ -1,6 +1,7 @@
 import io
 import json
 import uuid
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
@@ -520,3 +521,37 @@ def test_other_sites_get_no_cookies(client, downloads_dir, instagram_cookies):
     assert read_metadata(downloads_dir, download_id)['status'] == 'completed'
     (ydl,) = FakeYoutubeDL.instances
     assert 'cookiefile' not in ydl.opts
+
+
+LEGACY_JOB_ID = '0b7f6c1e-3f4a-4d2b-9c8e-1a2b3c4d5e6f'
+
+
+def write_legacy_job(downloads_dir, **fields) -> Path:
+    """A job as the service stored it before artifacts, subtitles and completed_at existed"""
+    job_dir = downloads_dir / LEGACY_JOB_ID
+    job_dir.mkdir(parents=True)
+    (job_dir / 'Old_Video-abc.mp4').write_bytes(b'old video')
+    (job_dir / 'download.log').write_text('log')
+    metadata = {
+        'download_id': LEGACY_JOB_ID,
+        'url': VIDEO_URL,
+        'status': 'completed',
+        'files': ['Old_Video-abc.mp4', 'download.log'],
+        'error': None,
+        'created_at': '2025-03-01T10:00:00',
+        'updated_at': '2025-03-01T10:05:00',
+        'title': 'Old Video',
+    } | fields
+    (job_dir / 'metadata.json').write_text(json.dumps(metadata))
+    return job_dir
+
+
+def test_legacy_job_does_not_list_or_serve_its_log(client, downloads_dir):
+    write_legacy_job(downloads_dir)
+
+    status = client.get(f'/status/{LEGACY_JOB_ID}').json()
+
+    assert status['status'] == 'completed'
+    assert status['files'] == ['Old_Video-abc.mp4']
+    assert client.get(f'/downloads/{LEGACY_JOB_ID}/Old_Video-abc.mp4').content == b'old video'
+    assert client.get(f'/downloads/{LEGACY_JOB_ID}/download.log').status_code == 404

@@ -11,7 +11,7 @@ from pydantic import BaseModel
 
 from video_download import config
 from video_download.jobs import create_job, download_video_task, fail_interrupted_downloads
-from video_download.storage import LOG_FILENAME, METADATA_FILENAME, load_metadata
+from video_download.storage import load_metadata, media_files
 from video_download.urls import InvalidDownloadUrl, resolve_download_url
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -102,7 +102,7 @@ async def get_download_status(download_id: uuid.UUID):
     if not metadata:
         raise HTTPException(status_code=404, detail='Download not found')
 
-    return DownloadStatus(**metadata)
+    return DownloadStatus(**(metadata | {'files': media_files(metadata)}))
 
 
 @app.get('/downloads/{download_id}/{filename}')
@@ -110,7 +110,7 @@ async def get_download_file(download_id: uuid.UUID, filename: str):
     """Serve a downloaded media file, only the ones listed in the job's metadata"""
     download_dir = config.DOWNLOADS_DIR / str(download_id)
     metadata = load_metadata(download_dir)
-    if not metadata or filename in (METADATA_FILENAME, LOG_FILENAME) or filename not in (metadata.get('files') or []):
+    if not metadata or filename not in media_files(metadata):
         raise HTTPException(status_code=404, detail='File not found')
 
     path = (download_dir / filename).resolve()

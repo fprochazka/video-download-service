@@ -9,6 +9,9 @@ from pathlib import Path
 METADATA_FILENAME = 'metadata.json'
 LOG_FILENAME = 'download.log'
 
+# Job files that are never offered for download; jobs created before download.log was excluded list it in files
+PRIVATE_FILENAMES = frozenset({METADATA_FILENAME, LOG_FILENAME})
+
 ACTIVE_STATUSES = ('pending', 'downloading')
 
 
@@ -50,3 +53,8 @@ def update_metadata(download_dir: Path, **fields) -> dict:
     metadata['updated_at'] = now_iso()
     save_metadata(download_dir, metadata)
     return metadata
+
+
+def media_files(metadata: dict) -> list[str]:
+    """The job's media files from metadata, without the private files that old jobs listed"""
+    return [name for name in metadata.get('files') or [] if name not in PRIVATE_FILENAMES]
