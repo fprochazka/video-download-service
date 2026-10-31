@@ -3,6 +3,7 @@
 import json
 import os
 import tempfile
+import threading
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -21,6 +22,10 @@ ACTIVE_STATUSES = ('pending', 'downloading')
 MEDIA = 'media'
 SUBTITLE = 'subtitle'
 INFO = 'info'
+
+
+# Serialises the read-modify-write of metadata between a user's delete and the garbage collector's thread
+artifacts_lock = threading.Lock()
 
 
 def now_iso() -> str:
@@ -85,3 +90,33 @@ def job_artifacts(download_dir: Path, metadata: dict) -> list[dict]:
 def write_json(path: Path, data: dict):
     with open(path, 'w', encoding='utf-8') as f:
         json.dump(data, f, ensure_ascii=False)
+
+
+def remove_artifacts(download_dir: Path, names: set[str], reason: str) -> dict:
+    """Delete these artifacts of a job from disk and metadata, and record them in deleted_files.
+
+    Takes artifacts_lock and reloads the metadata under it. Names that are not artifacts of the job are ignored;
+    private files are never artifacts. Returns the updated metadata.
+    """
+    with artifacts_lock:
+        metadata = load_metadata(download_dir) or {}
+        artifacts = job_artifacts(download_dir, metadata)
+        removed = [a for a in artifacts if a['name'] in names]
+        if not removed:
+            return metadata
+        deleted_at = now_iso()
+        for entry in removed:
+            path = download_dir / entry['name']
+            if path.is_file() and not path.is_symlink():
+                path.unlink()
+        removed_names = {a['name'] for a in removed}
+        deleted = [
+            {'name': a['name'], 'kind': a['kind'], 'size': a.get('size'), 'deleted_at': deleted_at, 'reason': reason}
+            for a in removed
+        ]
+        return update_metadata(
+            download_dir,
+            files=[name for name in media_files(metadata) if name not in removed_names],
+            artifacts=[a for a in artifacts if a['name'] not in removed_names],
+            deleted_files=(metadata.get('deleted_files') or []) + deleted,
+        )

@@ -162,6 +162,47 @@
         .files-list a:hover {
             text-decoration: underline;
         }
+        .files-group {
+            margin: 15px 0 6px 0;
+            font-size: 14px;
+            color: #495057;
+        }
+        .files-list li.file-row {
+            display: flex;
+            flex-wrap: wrap;
+            align-items: center;
+            gap: 6px 12px;
+        }
+        .file-name {
+            flex: 1 1 auto;
+            word-break: break-all;
+        }
+        .file-meta {
+            color: #6c757d;
+            font-size: 13px;
+        }
+        .file-actions {
+            display: flex;
+            gap: 8px;
+            align-items: center;
+        }
+        .files-list button {
+            padding: 4px 12px;
+            font-size: 13px;
+            margin: 0;
+            width: auto;
+        }
+        .files-list button.danger {
+            background-color: #dc3545;
+        }
+        .files-list button.danger:hover {
+            background-color: #b02a37;
+        }
+        .files-list li.file-deleted {
+            color: #6c757d;
+            border-left-color: #ced4da;
+            font-size: 13px;
+        }
         .spinner {
             display: inline-block;
             width: 14px;
@@ -314,6 +355,85 @@
             return fallback;
         }
 
+        const FILE_GROUPS = [
+            { kind: 'media', title: 'Media' },
+            { kind: 'subtitle', title: 'Subtitles' },
+            { kind: 'info', title: 'Details' },
+        ];
+
+        function formatSize(bytes) {
+            if (typeof bytes !== 'number') return '';
+            const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+            let value = bytes;
+            let unit = 0;
+            while (value >= 1024 && unit < units.length - 1) {
+                value /= 1024;
+                unit++;
+            }
+            return `${unit === 0 ? value : value.toFixed(1)} ${units[unit]}`;
+        }
+
+        function subtitleLabel(artifact) {
+            if (artifact.kind !== 'subtitle' || !artifact.lang) return '';
+            return artifact.auto ? `${artifact.lang}, auto` : artifact.lang;
+        }
+
+        // One entry per button of a file row, a new action is one more entry
+        function fileActions(downloadId, artifact) {
+            const href = `/downloads/${encodeURIComponent(downloadId)}/${encodeURIComponent(artifact.name)}`;
+            return [
+                `<a href="${escapeHtml(href)}" download>Download</a>`,
+                `<button type="button" class="danger" data-delete-file="${escapeHtml(artifact.name)}">Delete</button>`,
+            ];
+        }
+
+        function renderFileRow(downloadId, artifact) {
+            const meta = [subtitleLabel(artifact), formatSize(artifact.size)].filter(Boolean).join(' · ');
+            return '<li class="file-row">'
+                + `<span class="file-name">${escapeHtml(artifact.name)}</span>`
+                + `<span class="file-meta">${escapeHtml(meta)}</span>`
+                + `<span class="file-actions">${fileActions(downloadId, artifact).join('')}</span>`
+                + '</li>';
+        }
+
+        function renderDeletedFile(deleted) {
+            const when = deleted.deleted_at ? new Date(deleted.deleted_at).toLocaleDateString() : '';
+            const why = deleted.reason === 'gc' ? ' by the automatic cleanup' : '';
+            return `<li class="file-deleted">${escapeHtml(deleted.name)}: deleted ${escapeHtml(when)}${escapeHtml(why)}</li>`;
+        }
+
+        function renderFiles(status) {
+            const artifacts = status.artifacts || [];
+            const deletedFiles = status.deleted_files || [];
+            let html = '';
+            FILE_GROUPS.forEach(group => {
+                const rows = artifacts.filter(artifact => artifact.kind === group.kind);
+                const deleted = deletedFiles.filter(file => file.kind === group.kind);
+                if (rows.length === 0 && deleted.length === 0) return;
+                html += `<h4 class="files-group">${escapeHtml(group.title)}</h4><ul class="files-list">`;
+                rows.forEach(artifact => { html += renderFileRow(status.download_id, artifact); });
+                deleted.forEach(file => { html += renderDeletedFile(file); });
+                html += '</ul>';
+            });
+            return html;
+        }
+
+        async function deleteFile(downloadId, filename) {
+            if (!confirm(`Delete ${filename}? This cannot be undone.`)) return;
+            try {
+                const response = await fetch(`/downloads/${encodeURIComponent(downloadId)}/${encodeURIComponent(filename)}`, {
+                    method: 'DELETE',
+                    headers: { 'X-CSRF-Token': csrfToken },
+                });
+                if (!response.ok) {
+                    throw new Error(await responseDetail(response, `Could not delete the file (HTTP ${response.status})`));
+                }
+            } catch (error) {
+                alert(error.message);
+            }
+            await pollStatus(downloadId);
+        }
+
         // The job page is /jobs/{download_id}, the id in the path keeps the reference across reloads and shares
         function jobIdFromPath() {
             const match = window.location.pathname.match(/^\/jobs\/([^/]+)\/?$/);
@@ -366,15 +486,7 @@
                     let filesHtml = '<strong>Download completed!</strong>';
 
                     // File list
-                    const artifacts = status.artifacts || [];
-                    if (artifacts.length > 0) {
-                        filesHtml += '<ul class="files-list">';
-                        artifacts.forEach(artifact => {
-                            const href = `/downloads/${encodeURIComponent(status.download_id)}/${encodeURIComponent(artifact.name)}`;
-                            filesHtml += `<li><a href="${escapeHtml(href)}" download>${escapeHtml(artifact.name)}</a></li>`;
-                        });
-                        filesHtml += '</ul>';
-                    }
+                    filesHtml += renderFiles(status);
 
                     // Show metadata in pretty format
                     filesHtml += '<div class="metadata">';
@@ -520,6 +632,14 @@
                 window.location.assign(`/jobs/${encodeURIComponent(result.download_id)}`);
             } catch (error) {
                 showError(`<strong>Error:</strong> ${escapeHtml(error.message)}`);
+            }
+        });
+
+        statusDiv.addEventListener('click', (e) => {
+            const filename = e.target.dataset ? e.target.dataset.deleteFile : undefined;
+            const downloadId = jobIdFromPath();
+            if (filename && downloadId) {
+                deleteFile(downloadId, filename);
             }
         });
 

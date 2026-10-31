@@ -65,14 +65,58 @@ def test_job_page_of_unknown_job_says_not_found(page_script):
     assert result['status'] == {'className': 'status error', 'text': 'Error: Download not found.'}
 
 
-def test_completed_job_links_every_artifact(page_script):
+def test_completed_job_lists_files_grouped_with_download_and_delete(page_script):
     result = run_scenario(page_script, 'job-completed')
 
     assert result['status']['className'] == 'status success'
+    assert result['groups'] == ['Media', 'Subtitles', 'Details']
+    evil = '&quot;&gt;&lt;img src=x onerror=alert(1)&gt;.mp4'
     assert result['links'] == [
         f'/downloads/{JOB_ID}/Some_video-abc.mp4',
+        f'/downloads/{JOB_ID}/%22%3E%3Cimg%20src%3Dx%20onerror%3Dalert(1)%3E.mp4',
         f'/downloads/{JOB_ID}/Some_video-abc.en.vtt',
         f'/downloads/{JOB_ID}/Some_video-abc.cs-orig.vtt',
         f'/downloads/{JOB_ID}/info.json',
     ]
+    assert result['rows'] == [
+        '|Some_video-abc.mp4||50.0 MB||[Download][Delete Some_video-abc.mp4]|',
+        f'|{evil}||3 B||[Download][Delete {evil}]|',
+        '|Some_video-abc.en.vtt||en · 40.0 KB||[Download][Delete Some_video-abc.en.vtt]|',
+        '|Some_video-abc.cs-orig.vtt||cs-orig, auto · 38.1 KB||[Download][Delete Some_video-abc.cs-orig.vtt]|',
+        '|info.json||341.8 KB||[Download][Delete info.json]|',
+    ]
+    assert len(result['deleted']) == 1
+    assert result['deleted'][0].startswith('Old-abc.en.vtt: deleted ')
+    assert result['deleted'][0].endswith(' by the automatic cleanup')
+    assert '<img' not in result['html']
     assert '<b>video</b>' not in result['html']
+
+
+def test_delete_asks_then_sends_the_csrf_token_and_shows_the_deleted_file(page_script):
+    result = run_scenario(page_script, 'delete-file')
+
+    assert result['confirms'] == ['Delete Some_video-abc.mp4? This cannot be undone.']
+    delete = {
+        'url': f'/downloads/{JOB_ID}/Some_video-abc.mp4',
+        'method': 'DELETE',
+        'body': None,
+        'csrf': 'page-token',
+    }
+    assert result['fetches'][1] == delete
+    assert result['fetches'][2]['url'] == f'/status/{JOB_ID}'
+    assert result['groups'] == ['Media', 'Subtitles', 'Details']
+    assert [d.split(':')[0] for d in result['deleted']] == ['Some_video-abc.mp4', 'Old-abc.en.vtt']
+    assert result['alerts'] == []
+
+
+def test_cancelled_delete_sends_nothing(page_script):
+    result = run_scenario(page_script, 'delete-cancelled')
+
+    assert [f['method'] for f in result['fetches']] == ['GET']
+
+
+def test_refused_delete_tells_the_user(page_script):
+    result = run_scenario(page_script, 'delete-refused')
+
+    assert result['alerts'] == ['The download is still running.']
+    assert len(result['rows']) == 5

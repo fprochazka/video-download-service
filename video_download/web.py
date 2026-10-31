@@ -12,12 +12,14 @@ from pydantic import BaseModel
 from video_download import config
 from video_download.csrf import page_token, require_csrf, set_token_cookie
 from video_download.jobs import create_job, download_video_task, fail_interrupted_downloads
-from video_download.storage import job_artifacts, load_metadata, media_files
+from video_download.storage import ACTIVE_STATUSES, job_artifacts, load_metadata, media_files, remove_artifacts
 from video_download.urls import InvalidDownloadUrl, resolve_download_url
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 
 TEMPLATES_DIR = Path(__file__).parent / 'templates'
+
+logger = logging.getLogger(__name__)
 
 
 class DownloadInitResponse(BaseModel):
@@ -32,6 +34,14 @@ class Artifact(BaseModel):
     auto: bool | None = None  # subtitle is automatic captions
 
 
+class DeletedFile(BaseModel):
+    name: str
+    kind: str
+    size: int | None = None
+    deleted_at: str
+    reason: str  # user, gc
+
+
 class DownloadStatus(BaseModel):
     download_id: str
     status: str  # pending, downloading, completed, failed
@@ -40,6 +50,7 @@ class DownloadStatus(BaseModel):
     extractor: str | None = None
     files: list[str] = []
     artifacts: list[Artifact] = []
+    deleted_files: list[DeletedFile] = []
     error: str | None = None
     error_code: str | None = None
     error_type: str | None = None
@@ -122,6 +133,10 @@ async def get_download_status(download_id: uuid.UUID):
     if not metadata:
         raise HTTPException(status_code=404, detail='Download not found')
 
+    return status_response(download_dir, metadata)
+
+
+def status_response(download_dir: Path, metadata: dict) -> DownloadStatus:
     return DownloadStatus(
         **(metadata | {'files': media_files(metadata), 'artifacts': job_artifacts(download_dir, metadata)})
     )
@@ -140,3 +155,22 @@ async def get_download_file(download_id: uuid.UUID, filename: str):
         raise HTTPException(status_code=404, detail='File not found')
 
     return FileResponse(path, filename=filename)
+
+
+@app.delete('/downloads/{download_id}/{filename}', dependencies=[Depends(require_csrf)])
+async def delete_download_file(download_id: uuid.UUID, filename: str):
+    """Delete one file of a finished job, the job keeps a record of it in deleted_files; returns the job's status"""
+    download_dir = config.DOWNLOADS_DIR / str(download_id)
+    metadata = load_metadata(download_dir)
+    if not metadata:
+        raise HTTPException(status_code=404, detail='File not found')
+    if metadata.get('status') in ACTIVE_STATUSES:
+        raise HTTPException(status_code=409, detail='The download is still running, delete its files after it ends.')
+    if filename not in {a['name'] for a in job_artifacts(download_dir, metadata)}:
+        raise HTTPException(status_code=404, detail='File not found')
+    if (download_dir / filename).resolve().parent != download_dir.resolve():
+        raise HTTPException(status_code=404, detail='File not found')
+
+    metadata = remove_artifacts(download_dir, {filename}, reason='user')
+    logger.info('Download %s: deleted %s on user request', download_id, filename)
+    return status_response(download_dir, metadata)

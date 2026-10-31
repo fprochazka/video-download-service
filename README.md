@@ -13,6 +13,7 @@ A simple web service for downloading videos from various platforms using yt-dlp 
 - **URL-safe filenames** - yt-dlp's `restrictfilenames` keeps names ASCII without spaces, the video id keeps them unique
 - **Best quality** - Downloads the best video and audio streams and merges them into mp4 with ffmpeg
 - **Subtitles and details** - Each job also downloads the subtitles in the video's own language and in English, and the video details yt-dlp extracted (`info.json`). A manual subtitle track wins over automatic captions of the same language; of the automatic captions only the speech recognition track (YouTube's `<lang>-orig`) and the English one are taken, never the ~100 machine translations. A failed subtitle download does not fail the job, the error is in `subtitles_error`
+- **File list with delete** - The job page lists the files grouped as media, subtitles and details, with their size, a download link and a delete button. Deleted files stay listed as deleted, with the date
 - **Single videos only** - A YouTube link to a video inside a playlist or mix downloads just that video; playlist and channel links are rejected. Other sites are untouched, so Instagram carousels still download all their items
 - **Error handling** - Failed downloads are tracked in metadata with the error message and a machine-readable `error_code`, and logged to the service log
 - **Download status states**:
@@ -317,6 +318,9 @@ video-download/
   - Returns: Status object with download state, files, metadata, errors; 404 for an unknown id, 422 for a malformed one
 - `GET /downloads/{download_id}/{filename}` - Download a specific file
   - Serves only the files listed in the job's `artifacts`; `metadata.json` and `download.log` are not public
+- `DELETE /downloads/{download_id}/{filename}` - Delete one file of the job's `artifacts`, requires the CSRF token
+  - Returns the job's status; records the file in `deleted_files`
+  - 404 for an unknown job or a file that is not an artifact (including `metadata.json` and `download.log`), 409 while the job is `pending` or `downloading`
 
 ### CSRF protection
 
@@ -340,6 +344,9 @@ Each download creates a `metadata.json` file with:
     {"name": "info.json", "kind": "info", "size": 350000}
   ],
   "subtitles_error": null,
+  "deleted_files": [
+    {"name": "Video_Title-dQw4w9WgXcQ.en-GB.vtt", "kind": "subtitle", "size": 40000, "deleted_at": "2025-01-15T08:00:00+00:00", "reason": "user"}
+  ],
   "error": null,
   "error_code": null,
   "error_type": null,
@@ -359,7 +366,7 @@ Each download creates a `metadata.json` file with:
 }
 ```
 
-`files` lists only the media; `artifacts` lists every downloadable file of the job with its `kind` (`media`, `subtitle`, `info`). For a subtitle, `lang` is yt-dlp's track key (`en`, `en-GB`, `cs-orig`) and `auto` is `true` for automatic captions. Jobs created before artifacts existed have no `artifacts` and no `completed_at`; `/status` lists their media files as artifacts.
+`files` lists only the media; `artifacts` lists every downloadable file of the job with its `kind` (`media`, `subtitle`, `info`). For a subtitle, `lang` is yt-dlp's track key (`en`, `en-GB`, `cs-orig`) and `auto` is `true` for automatic captions. `deleted_files` keeps a record of every file removed from `artifacts`; `reason` is `user` for the delete button. Jobs created before artifacts existed have no `artifacts` and no `completed_at`; `/status` lists their media files as artifacts.
 
 YouTube jobs also carry `used_youtube_cookies` (`true` when the retry with `youtube_cookies.txt` ran).
 

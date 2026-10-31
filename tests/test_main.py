@@ -749,3 +749,88 @@ def test_download_from_the_page_passes_csrf(client, headers):
     response = client.post('/download', data={'url': VIDEO_URL}, headers=headers)
 
     assert response.status_code == 200
+
+
+def completed_job_with_subtitles(client) -> str:
+    FakeYoutubeDL.behaviour = youtube_video
+    FakeYoutubeDL.subtitles_behaviour = write_requested_subtitles
+    return client.post('/download', data={'url': VIDEO_URL}).json()['download_id']
+
+
+@pytest.mark.parametrize(
+    ('filename', 'kind'),
+    [('Czech_Video-abc.mp4', 'media'), ('Czech_Video-abc.en.vtt', 'subtitle'), ('info.json', 'info')],
+)
+def test_delete_removes_the_file_and_records_it(client, downloads_dir, filename, kind):
+    download_id = completed_job_with_subtitles(client)
+    size = (downloads_dir / download_id / filename).stat().st_size
+
+    response = client.delete(f'/downloads/{download_id}/{filename}')
+
+    assert response.status_code == 200
+    assert not (downloads_dir / download_id / filename).exists()
+    metadata = read_metadata(downloads_dir, download_id)
+    assert filename not in metadata['files']
+    assert filename not in [a['name'] for a in metadata['artifacts']]
+    (deleted,) = metadata['deleted_files']
+    assert deleted == {
+        'name': filename,
+        'kind': kind,
+        'size': size,
+        'deleted_at': deleted['deleted_at'],
+        'reason': 'user',
+    }
+    assert response.json()['deleted_files'] == [deleted]
+    assert filename not in [a['name'] for a in response.json()['artifacts']]
+    assert client.get(f'/downloads/{download_id}/{filename}').status_code == 404
+    assert client.delete(f'/downloads/{download_id}/{filename}').status_code == 404
+
+
+def test_delete_of_legacy_job_media(client, downloads_dir):
+    job_dir = write_legacy_job(downloads_dir)
+
+    response = client.delete(f'/downloads/{LEGACY_JOB_ID}/Old_Video-abc.mp4')
+
+    assert response.status_code == 200
+    assert not (job_dir / 'Old_Video-abc.mp4').exists()
+    assert (job_dir / 'download.log').exists()
+    metadata = read_metadata(downloads_dir, LEGACY_JOB_ID)
+    assert metadata['files'] == []
+    assert metadata['artifacts'] == []
+    assert metadata['deleted_files'][0]['size'] == 9
+
+
+@pytest.mark.parametrize('filename', ['metadata.json', 'download.log', 'unknown.mp4', '..', '%2e%2e%2fsecret'])
+def test_delete_refuses_private_unknown_and_outside_files(client, downloads_dir, filename):
+    download_id = completed_job_with_subtitles(client)
+    (downloads_dir / download_id / 'unknown.mp4').write_bytes(b'x')
+    (downloads_dir / 'secret').write_text('secret')
+    before = sorted(p.name for p in (downloads_dir / download_id).iterdir())
+
+    response = client.delete(f'/downloads/{download_id}/{filename}')
+
+    assert response.status_code in (404, 405)
+    assert sorted(p.name for p in (downloads_dir / download_id).iterdir()) == before
+    assert (downloads_dir / 'secret').exists()
+
+
+@pytest.mark.parametrize('status', ['pending', 'downloading'])
+def test_delete_refuses_while_the_job_runs(client, downloads_dir, status):
+    job_dir = write_legacy_job(downloads_dir, status=status)
+
+    response = client.delete(f'/downloads/{LEGACY_JOB_ID}/Old_Video-abc.mp4')
+
+    assert response.status_code == 409
+    assert (job_dir / 'Old_Video-abc.mp4').exists()
+
+
+def test_delete_needs_the_csrf_token(client, downloads_dir):
+    job_dir = write_legacy_job(downloads_dir)
+    client.headers.pop('X-CSRF-Token')
+
+    assert client.delete(f'/downloads/{LEGACY_JOB_ID}/Old_Video-abc.mp4').status_code == 403
+    assert (job_dir / 'Old_Video-abc.mp4').exists()
+
+
+def test_delete_of_unknown_job(client):
+    assert client.delete('/downloads/00000000-0000-0000-0000-000000000000/x.mp4').status_code == 404
