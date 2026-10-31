@@ -4,8 +4,10 @@ import json
 import os
 import tempfile
 import threading
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import TextIO
 
 METADATA_FILENAME = 'metadata.json'
 LOG_FILENAME = 'download.log'
@@ -32,20 +34,25 @@ def now_iso() -> str:
     return datetime.now(UTC).isoformat()
 
 
-def save_metadata(download_dir: Path, metadata: dict):
-    """Atomically replace metadata.json, so a reader never sees a half-written file"""
-    fd, tmp_name = tempfile.mkstemp(dir=download_dir, prefix='.metadata.', suffix='.tmp')
+def write_atomic(path: Path, write: Callable[[TextIO], object]):
+    """Replace the file through a temporary file next to it, so a reader never sees a half-written file"""
+    fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=f'.{path.stem}.', suffix='.tmp')
     try:
         with os.fdopen(fd, 'w', encoding='utf-8') as f:
-            json.dump(metadata, f, indent=2, ensure_ascii=False)
+            write(f)
             f.flush()
             os.fsync(f.fileno())
-        # mkstemp creates the file as 0600, keep metadata readable on the host like the other job files
+        # mkstemp creates the file as 0600, keep it readable on the host like the other job files
         os.chmod(tmp_name, 0o644)
-        os.replace(tmp_name, download_dir / METADATA_FILENAME)
+        os.replace(tmp_name, path)
     except BaseException:
         Path(tmp_name).unlink(missing_ok=True)
         raise
+
+
+def save_metadata(download_dir: Path, metadata: dict):
+    """Atomically replace metadata.json"""
+    write_atomic(download_dir / METADATA_FILENAME, lambda f: json.dump(metadata, f, indent=2, ensure_ascii=False))
 
 
 def load_metadata(download_dir: Path) -> dict | None:
