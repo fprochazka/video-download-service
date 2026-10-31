@@ -25,6 +25,7 @@ downloads/*
 
 # Cookies (contain login sessions)
 cookies.txt
+youtube_cookies.txt
 
 # Custom extractor configuration (may contain site-specific tweaks)
 extractor_config.py

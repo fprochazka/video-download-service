@@ -1,4 +1,5 @@
 import asyncio
+import io
 import json
 import logging
 import os
@@ -43,6 +44,10 @@ PLAYLIST_REJECTED_MESSAGE = 'Playlists and channels are not supported, paste a l
 
 ACTIVE_STATUSES = ('pending', 'downloading')
 
+# Only sent to YouTube on a retry after a needs_auth failure, see README
+YOUTUBE_COOKIES_FILE_ENV = 'YOUTUBE_COOKIES_FILE'
+YOUTUBE_COOKIES_FILE_DEFAULT = 'youtube_cookies.txt'
+
 
 class DownloadInitResponse(BaseModel):
     download_id: str
@@ -58,6 +63,7 @@ class DownloadStatus(BaseModel):
     error: str | None = None
     error_code: str | None = None
     error_type: str | None = None
+    used_youtube_cookies: bool | None = None
     created_at: str
     updated_at: str
     # Video metadata fields (optional)
@@ -264,7 +270,17 @@ def load_user_config() -> tuple[dict, dict]:
     return EXTRACTOR_ARGS, YTDLP_OPTS
 
 
-def build_ydl_opts(download_dir: Path, ytdlp_logger: logging.Logger) -> dict:
+def is_youtube_extractor(extractor: str | None) -> bool:
+    return bool(extractor) and extractor.startswith('Youtube')
+
+
+def youtube_cookies_file() -> Path | None:
+    """The YouTube cookies file, if there is one (a Docker bind mount of a missing file creates a directory)"""
+    path = Path(os.environ.get(YOUTUBE_COOKIES_FILE_ENV) or YOUTUBE_COOKIES_FILE_DEFAULT)
+    return path if path.is_file() else None
+
+
+def build_ydl_opts(download_dir: Path, ytdlp_logger: logging.Logger, general_cookies: bool = True) -> dict:
     extractor_args, user_opts = load_user_config()
 
     ydl_opts = {
@@ -292,9 +308,9 @@ def build_ydl_opts(download_dir: Path, ytdlp_logger: logging.Logger) -> dict:
         }
     )
 
-    # Add cookies if available (helps with age-restricted Instagram content)
+    # Add cookies if available (helps with age-restricted Instagram content), never sent to YouTube
     cookies_file = Path('cookies.txt')
-    if cookies_file.exists():
+    if general_cookies and cookies_file.exists():
         ydl_opts['cookiefile'] = str(cookies_file)
 
     return ydl_opts
@@ -375,6 +391,36 @@ def cleanup_ytdlp_logger(download_id: str):
         ytdlp_logger.removeHandler(handler)
 
 
+def is_needs_auth(exc: BaseException) -> bool:
+    try:
+        return classify_error(exc)['error_code'] == 'needs_auth'
+    except Exception:
+        logger.exception('Could not classify an error for the YouTube cookies retry')
+        return False
+
+
+async def download_youtube(
+    download_id: str, download_dir: Path, download_url: str, ytdlp_logger: logging.Logger
+) -> dict | None:
+    """First attempt without cookies, one retry with the YouTube cookies file when YouTube asks for a login"""
+    update_metadata(download_dir, used_youtube_cookies=False)
+    ydl_opts = build_ydl_opts(download_dir, ytdlp_logger, general_cookies=False)
+    try:
+        return await asyncio.to_thread(run_ytdlp, ydl_opts, download_url)
+    except Exception as e:
+        cookies_file = youtube_cookies_file()
+        if cookies_file is None or not is_needs_auth(e):
+            raise
+
+    logger.info('Download %s needs a YouTube login, retrying with YouTube cookies from %s', download_id, cookies_file)
+    ytdlp_logger.info('YouTube asked for a login, retrying with YouTube cookies from %s', cookies_file)
+    update_metadata(download_dir, used_youtube_cookies=True)
+    retry_opts = build_ydl_opts(download_dir, ytdlp_logger, general_cookies=False)
+    # A text stream instead of the path, so yt-dlp never writes the cookies back to the file
+    retry_opts['cookiefile'] = io.StringIO(cookies_file.read_text(encoding='utf-8'))
+    return await asyncio.to_thread(run_ytdlp, retry_opts, download_url)
+
+
 def mark_failed(download_dir: Path, download_id: str, error: dict, extractor: str | None = None):
     logger.error(
         'Download %s failed: extractor=%s error_code=%s error_type=%s: %s',
@@ -400,8 +446,12 @@ async def download_video_task(download_id: str, url: str):
         extractor = metadata.get('extractor')
         download_url = metadata.get('download_url') or url
 
-        ydl_opts = build_ydl_opts(download_dir, setup_ytdlp_logger(download_id, download_dir))
-        info = await asyncio.to_thread(run_ytdlp, ydl_opts, download_url)
+        ytdlp_logger = setup_ytdlp_logger(download_id, download_dir)
+        if is_youtube_extractor(extractor):
+            info = await download_youtube(download_id, download_dir, download_url, ytdlp_logger)
+        else:
+            ydl_opts = build_ydl_opts(download_dir, ytdlp_logger)
+            info = await asyncio.to_thread(run_ytdlp, ydl_opts, download_url)
 
         files = collect_downloaded_files(info, download_dir)
         video_metadata = extract_video_metadata(info) if info else {}

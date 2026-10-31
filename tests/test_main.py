@@ -1,3 +1,4 @@
+import io
 import json
 
 import pytest
@@ -320,3 +321,158 @@ def test_save_metadata_is_atomic(tmp_path, monkeypatch):
 
     assert json.loads((tmp_path / 'metadata.json').read_text()) == {'status': 'pending'}
     assert [p.name for p in tmp_path.iterdir()] == ['metadata.json']
+
+
+YOUTUBE_COOKIES = '# Netscape HTTP Cookie File\n.youtube.com\tTRUE\t/\tTRUE\t0\tSID\tsecret\n'
+
+
+def bot_checked():
+    raise_like_ytdlp(
+        ExtractorError(
+            'Sign in to confirm you’re not a bot. Use --cookies-from-browser or --cookies for the authentication. '
+            'See  https://github.com/yt-dlp/yt-dlp/wiki/FAQ#how-do-i-pass-cookies-to-yt-dlp  for how to manually pass '
+            'cookies. Also see  https://github.com/yt-dlp/yt-dlp/wiki/Extractors#exporting-youtube-cookies  for tips on '
+            'effectively exporting YouTube cookies',
+            expected=True,
+            ie='youtube',
+            video_id='dQw4w9WgXcQ',
+        )
+    )
+
+
+def test_bot_check_is_needs_auth():
+    with pytest.raises(Exception) as exc_info:
+        bot_checked()
+
+    assert main.classify_error(exc_info.value)['error_code'] == 'needs_auth'
+
+
+def fail_without_cookies_then(retry):
+    """yt-dlp behaviour that asks for a login unless a cookiefile is passed, then runs retry(opts)"""
+
+    def behaviour(opts, url):
+        if 'cookiefile' not in opts:
+            write_media(opts, 'leftover.f137.mp4.part')
+            bot_checked()
+        return retry(opts)
+
+    return behaviour
+
+
+@pytest.fixture
+def general_cookies(downloads_dir):
+    path = downloads_dir.parent / 'cookies.txt'
+    path.write_text('# Netscape HTTP Cookie File\n')
+    return path
+
+
+def test_youtube_without_cookies_file_fails_with_needs_auth(client, downloads_dir, general_cookies):
+    FakeYoutubeDL.behaviour = fail_without_cookies_then(lambda opts: pytest.fail('must not retry'))
+
+    download_id = client.post('/download', data={'url': VIDEO_URL}).json()['download_id']
+
+    metadata = read_metadata(downloads_dir, download_id)
+    assert metadata['status'] == 'failed'
+    assert metadata['error_code'] == 'needs_auth'
+    assert metadata['used_youtube_cookies'] is False
+    (ydl,) = FakeYoutubeDL.instances
+    assert 'cookiefile' not in ydl.opts
+
+
+def test_youtube_cookies_directory_is_treated_as_absent(client, downloads_dir):
+    (downloads_dir.parent / 'youtube_cookies.txt').mkdir()
+    FakeYoutubeDL.behaviour = fail_without_cookies_then(lambda opts: pytest.fail('must not retry'))
+
+    download_id = client.post('/download', data={'url': VIDEO_URL}).json()['download_id']
+
+    assert read_metadata(downloads_dir, download_id)['error_code'] == 'needs_auth'
+    assert len(FakeYoutubeDL.instances) == 1
+
+
+def test_youtube_needs_auth_is_retried_with_youtube_cookies(client, downloads_dir, general_cookies, caplog):
+    cookies_file = downloads_dir.parent / 'youtube_cookies.txt'
+    cookies_file.write_text(YOUTUBE_COOKIES)
+
+    def retry(opts):
+        assert opts['cookiefile'].read() == YOUTUBE_COOKIES
+        return {'id': 'dQw4w9WgXcQ', 'requested_downloads': [{'filepath': write_media(opts, 'Video-dQw4w9WgXcQ.mp4')}]}
+
+    FakeYoutubeDL.behaviour = fail_without_cookies_then(retry)
+
+    download_id = client.post('/download', data={'url': VIDEO_URL}).json()['download_id']
+
+    metadata = read_metadata(downloads_dir, download_id)
+    assert metadata['status'] == 'completed'
+    assert metadata['files'] == ['Video-dQw4w9WgXcQ.mp4']
+    assert metadata['used_youtube_cookies'] is True
+    first, second = FakeYoutubeDL.instances
+    assert 'cookiefile' not in first.opts
+    assert isinstance(second.opts['cookiefile'], io.StringIO)
+    assert cookies_file.read_text() == YOUTUBE_COOKIES
+    assert any(
+        download_id in r.getMessage() and 'retrying with YouTube cookies' in r.getMessage() for r in caplog.records
+    )
+    assert 'retrying with YouTube cookies' in (downloads_dir / download_id / 'download.log').read_text()
+    assert client.get(f'/status/{download_id}').json()['used_youtube_cookies'] is True
+
+
+def test_youtube_cookies_file_path_comes_from_env(client, downloads_dir, monkeypatch):
+    cookies_file = downloads_dir.parent / 'secrets' / 'yt.txt'
+    cookies_file.parent.mkdir()
+    cookies_file.write_text(YOUTUBE_COOKIES)
+    monkeypatch.setenv('YOUTUBE_COOKIES_FILE', str(cookies_file))
+    FakeYoutubeDL.behaviour = fail_without_cookies_then(
+        lambda opts: {'id': 'x', 'requested_downloads': [{'filepath': write_media(opts, 'video-x.mp4')}]}
+    )
+
+    download_id = client.post('/download', data={'url': VIDEO_URL}).json()['download_id']
+
+    assert read_metadata(downloads_dir, download_id)['status'] == 'completed'
+    assert len(FakeYoutubeDL.instances) == 2
+
+
+def test_failed_youtube_cookies_retry_reports_the_retry_error(client, downloads_dir):
+    (downloads_dir.parent / 'youtube_cookies.txt').write_text(YOUTUBE_COOKIES)
+    FakeYoutubeDL.behaviour = fail_without_cookies_then(lambda opts: rate_limited())
+
+    download_id = client.post('/download', data={'url': VIDEO_URL}).json()['download_id']
+
+    metadata = read_metadata(downloads_dir, download_id)
+    assert metadata['status'] == 'failed'
+    assert metadata['error_code'] == 'rate_limited'
+    assert metadata['files'] == []
+    assert metadata['used_youtube_cookies'] is True
+    assert len(FakeYoutubeDL.instances) == 2
+
+
+def test_youtube_rate_limit_is_not_retried_with_cookies(client, downloads_dir):
+    (downloads_dir.parent / 'youtube_cookies.txt').write_text(YOUTUBE_COOKIES)
+
+    def behaviour(opts, url):
+        rate_limited()
+
+    FakeYoutubeDL.behaviour = behaviour
+
+    download_id = client.post('/download', data={'url': VIDEO_URL}).json()['download_id']
+
+    metadata = read_metadata(downloads_dir, download_id)
+    assert metadata['error_code'] == 'rate_limited'
+    assert metadata['used_youtube_cookies'] is False
+    assert len(FakeYoutubeDL.instances) == 1
+
+
+def test_instagram_uses_general_cookies_without_retry(client, downloads_dir, general_cookies):
+    (downloads_dir.parent / 'youtube_cookies.txt').write_text(YOUTUBE_COOKIES)
+
+    def behaviour(opts, url):
+        instagram_restricted()
+
+    FakeYoutubeDL.behaviour = behaviour
+
+    download_id = client.post('/download', data={'url': 'https://www.instagram.com/p/ABC123/'}).json()['download_id']
+
+    metadata = read_metadata(downloads_dir, download_id)
+    assert metadata['error_code'] == 'needs_auth'
+    assert 'used_youtube_cookies' not in metadata
+    (ydl,) = FakeYoutubeDL.instances
+    assert ydl.opts['cookiefile'] == 'cookies.txt'

@@ -191,7 +191,7 @@ ERROR: [Instagram]: This content may be inappropriate: It's unavailable for cert
 
 2. **Add cookies to the application:**
    - Place `cookies.txt` in the project root directory
-   - The application will automatically use it if present
+   - The application uses it for every site except YouTube, see [YouTube login](#youtube-login-optional-not-enabled-by-default)
    - For Docker: mount it as a volume in `docker-compose.yml`:
      ```yaml
      volumes:
@@ -202,6 +202,39 @@ ERROR: [Instagram]: This content may be inappropriate: It's unavailable for cert
 3. **Restart the application** to apply changes
 
 **Note:** Cookies contain your login session. Keep `cookies.txt` private and add it to `.gitignore`.
+
+#### YouTube login (optional, not enabled by default)
+
+The service never sends `cookies.txt` to YouTube. Every YouTube job first runs without cookies, because logged-in cookies make yt-dlp use other YouTube player clients, which can offer fewer formats. Set up a YouTube login only after a YouTube job failed with a login, age or bot check, for example `Sign in to confirm your age` or `Sign in to confirm you’re not a bot`. The page then shows a hint about `youtube_cookies.txt`.
+
+Before you start, know the risk. The yt-dlp wiki warns that YouTube can ban an account that yt-dlp uses. Usually YouTube blocks playback for that account for weeks or months, and the YouTube terms of service also let Google terminate the Google account. Use a secondary account, not your personal one. In the EU, a new account can need age verification (ID, card or selfie) before YouTube plays age-restricted videos.
+
+YouTube rotates the session cookies of a browser session that stays open, so export the cookies from a private window:
+
+1. Open a private (incognito) window and log in to YouTube.
+2. In the same tab, open https://www.youtube.com/robots.txt.
+3. Export the `youtube.com` cookies in Netscape format with an extension such as "Get cookies.txt LOCALLY".
+4. Close the private window. Do not use this session in the browser again.
+5. Save the file as `youtube_cookies.txt` next to `cookies.txt` and run `chmod 600 youtube_cookies.txt`.
+6. For Docker, add this line to the `volumes` of the `video-download` service in `docker-compose.yml`, then run `docker-compose up -d`:
+   ```yaml
+   - ./youtube_cookies.txt:/app/youtube_cookies.txt:ro
+   ```
+
+The compose file does not have this line by default: if the source file is missing, Docker creates a root-owned directory in its place. The service treats a directory as a missing file. To keep the file somewhere else, set the `YOUTUBE_COOKIES_FILE` environment variable to its path.
+
+How the service uses the file:
+
+- It reads the file at the start of each retry, so you do not have to restart the service after you add or replace it.
+- It sends the cookies only on one retry, after the first attempt of a YouTube job failed with `needs_auth`. If the retry also fails, the job shows the error of the retry.
+- It never writes the file back. yt-dlp gets the cookies as an in-memory copy.
+- The job's `metadata.json` records `used_youtube_cookies: true` when the retry ran.
+
+If `download.log` of the job contains `The provided YouTube account cookies are no longer valid`, YouTube rotated the cookies. Export them again with the steps above.
+
+The file is a full Google session credential. Keep it out of git (`.gitignore` and `.dockerignore` already exclude it) and readable only by you. To revoke the session, sign it out in Google Account → Security → Your devices.
+
+More in the yt-dlp wiki: [Exporting YouTube cookies](https://github.com/yt-dlp/yt-dlp/wiki/Extractors#exporting-youtube-cookies) and [How do I pass cookies to yt-dlp](https://github.com/yt-dlp/yt-dlp/wiki/FAQ#how-do-i-pass-cookies-to-yt-dlp).
 
 ### Custom Extractor Configuration
 
@@ -293,6 +326,8 @@ Each download creates a `metadata.json` file with:
   "resolution": "1920x1080"
 }
 ```
+
+YouTube jobs also carry `used_youtube_cookies` (`true` when the retry with `youtube_cookies.txt` ran).
 
 `download_url` differs from `url` when playlist parameters were stripped from a YouTube link. For a failed download, `error` is yt-dlp's message, `error_type` the class of the root exception, and `error_code` one of:
 

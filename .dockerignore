@@ -38,3 +38,6 @@ CLAUDE.md
 # Other
 .DS_Store
 *.log
+
+# YouTube account cookies (a full Google session), see README
+youtube_cookies.txt

@@ -476,7 +476,12 @@
                     statusDiv.innerHTML = filesHtml;
                 } else if (status.status === 'failed') {
                     let errorHtml = `<strong>Error:</strong> ${escapeHtml(status.error || 'Download failed')}`;
-                    const hint = ERROR_HINTS[status.error_code];
+                    let hint = ERROR_HINTS[status.error_code];
+                    if (status.error_code === 'needs_auth' && (status.extractor || '').startsWith('Youtube')) {
+                        hint = status.used_youtube_cookies
+                            ? 'YouTube rejected youtube_cookies.txt too. The cookies may have been rotated, re-export them (see README).'
+                            : 'YouTube requires a login. Add youtube_cookies.txt next to the app (see README), then try again.';
+                    }
                     if (hint) {
                         errorHtml += `<br><small>${escapeHtml(hint)}</small>`;
                     }
