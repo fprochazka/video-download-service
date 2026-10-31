@@ -42,16 +42,18 @@ This project uses [Ruff](https://github.com/astral-sh/ruff) for code formatting 
 
 ```bash
 # Check and auto-fix linting issues
-uv run ruff check main.py video_download tests --fix
+uv run ruff check . --fix
 
 # Format code
-uv run ruff format main.py video_download tests
+uv run ruff format .
 
 # Run the tests (yt-dlp is replaced by a fake, no network access)
 uv run pytest -q
 ```
 
 This ensures consistent code style and catches common issues.
+
+GitHub Actions runs the same checks on every push to `master` and on pull requests (`.github/workflows/ci.yml`), and also builds the Docker image, checks that yt-dlp in it finds Deno and ffmpeg, and checks that the app starts.
 
 The frontend tests run the page script in Node.js against a stubbed DOM, pytest skips them when `node` is not installed.
 
