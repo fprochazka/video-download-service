@@ -187,25 +187,25 @@ ERROR: [Instagram]: This content may be inappropriate: It's unavailable for cert
    - Install a browser extension like "Get cookies.txt LOCALLY" (Chrome/Firefox)
    - Log into Instagram (or the platform) in your browser
    - Use the extension to export cookies in Netscape format
-   - Save the file as `cookies.txt`
+   - Save the file as `instagram_cookies.txt`
 
 2. **Add cookies to the application:**
-   - Place `cookies.txt` in the project root directory
+   - Place `instagram_cookies.txt` in the project root directory
    - The application uses it for every site except YouTube, see [YouTube login](#youtube-login-optional-not-enabled-by-default)
    - For Docker: mount it as a volume in `docker-compose.yml`:
      ```yaml
      volumes:
        - ./downloads:/app/downloads
-       - ./cookies.txt:/app/cookies.txt:ro
+       - ./instagram_cookies.txt:/app/instagram_cookies.txt  # writable, yt-dlp saves refreshed session cookies back
      ```
 
 3. **Restart the application** to apply changes
 
-**Note:** Cookies contain your login session. Keep `cookies.txt` private and add it to `.gitignore`.
+**Note:** Cookies contain your login session. Keep `instagram_cookies.txt` private and add it to `.gitignore`.
 
 #### YouTube login (optional, not enabled by default)
 
-The service never sends `cookies.txt` to YouTube. Every YouTube job first runs without cookies, because logged-in cookies make yt-dlp use other YouTube player clients, which can offer fewer formats. Set up a YouTube login only after a YouTube job failed with a login, age or bot check, for example `Sign in to confirm your age` or `Sign in to confirm you’re not a bot`. The page then shows a hint about `youtube_cookies.txt`.
+The service never sends `instagram_cookies.txt` to YouTube. Every YouTube job first runs without cookies, because logged-in cookies make yt-dlp use other YouTube player clients, which can offer fewer formats. Set up a YouTube login only after a YouTube job failed with a login, age or bot check, for example `Sign in to confirm your age` or `Sign in to confirm you’re not a bot`. The page then shows a hint about `youtube_cookies.txt`.
 
 Before you start, know the risk. The yt-dlp wiki warns that YouTube can ban an account that yt-dlp uses. Usually YouTube blocks playback for that account for weeks or months, and the YouTube terms of service also let Google terminate the Google account. Use a secondary account, not your personal one. In the EU, a new account can need age verification (ID, card or selfie) before YouTube plays age-restricted videos.
 
@@ -332,7 +332,7 @@ YouTube jobs also carry `used_youtube_cookies` (`true` when the retry with `yout
 `download_url` differs from `url` when playlist parameters were stripped from a YouTube link. For a failed download, `error` is yt-dlp's message, `error_type` the class of the root exception, and `error_code` one of:
 
 - `rate_limited` - The site throttles requests (YouTube: "try again later"), retry in about an hour
-- `needs_auth` - Login, age confirmation or a private video, export `cookies.txt` (see above)
+- `needs_auth` - Login, age confirmation or a private video, export `instagram_cookies.txt` (see above), or `youtube_cookies.txt` for YouTube
 - `unavailable` - Removed, private or otherwise not available
 - `unsupported` - yt-dlp has no extractor for the URL
 - `geo_restricted` - Not available from the server's location

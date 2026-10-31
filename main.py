@@ -309,7 +309,7 @@ def build_ydl_opts(download_dir: Path, ytdlp_logger: logging.Logger, general_coo
     )
 
     # Add cookies if available (helps with age-restricted Instagram content), never sent to YouTube
-    cookies_file = Path('cookies.txt')
+    cookies_file = Path('instagram_cookies.txt')
     if general_cookies and cookies_file.exists():
         ydl_opts['cookiefile'] = str(cookies_file)
 

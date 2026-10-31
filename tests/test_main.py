@@ -361,7 +361,7 @@ def fail_without_cookies_then(retry):
 
 @pytest.fixture
 def general_cookies(downloads_dir):
-    path = downloads_dir.parent / 'cookies.txt'
+    path = downloads_dir.parent / 'instagram_cookies.txt'
     path.write_text('# Netscape HTTP Cookie File\n')
     return path
 
@@ -475,4 +475,4 @@ def test_instagram_uses_general_cookies_without_retry(client, downloads_dir, gen
     assert metadata['error_code'] == 'needs_auth'
     assert 'used_youtube_cookies' not in metadata
     (ydl,) = FakeYoutubeDL.instances
-    assert ydl.opts['cookiefile'] == 'cookies.txt'
+    assert ydl.opts['cookiefile'] == 'instagram_cookies.txt'
