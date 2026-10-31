@@ -328,6 +328,19 @@ def test_job_page_is_served_for_any_uuid(client, download_id):
     assert response.text == client.get('/').text
 
 
+@pytest.mark.parametrize('path', ['/favicon.svg', '/favicon.ico'])
+def test_favicon_is_served_as_svg(client, path):
+    response = client.get(path)
+
+    assert response.status_code == 200
+    assert response.headers['content-type'] == 'image/svg+xml'
+    assert response.content.startswith(b'<svg')
+
+
+def test_page_links_the_favicon(client):
+    assert '<link rel="icon" href="/favicon.svg" type="image/svg+xml">' in client.get('/').text
+
+
 def test_job_page_rejects_malformed_id(client):
     assert client.get('/jobs/not-a-uuid').status_code == 422
 

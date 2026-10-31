@@ -20,6 +20,7 @@ from video_download.urls import InvalidDownloadUrl, resolve_download_url
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 
 TEMPLATES_DIR = Path(__file__).parent / 'templates'
+FAVICON_FILE = Path(__file__).parent / 'static' / 'favicon.svg'
 
 logger = logging.getLogger(__name__)
 
@@ -115,6 +116,13 @@ def index_page(request: Request) -> HTMLResponse:
 async def index(request: Request):
     """Serve the main page with download form"""
     return index_page(request)
+
+
+@app.get('/favicon.svg', include_in_schema=False)
+@app.get('/favicon.ico', include_in_schema=False)
+async def favicon():
+    # Browsers ask for /favicon.ico on their own, and all current ones render an SVG served from there too
+    return FileResponse(FAVICON_FILE, media_type='image/svg+xml', headers={'Cache-Control': 'public, max-age=604800'})
 
 
 @app.get('/jobs/{download_id}', response_class=HTMLResponse)

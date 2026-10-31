@@ -314,6 +314,8 @@ video-download/
 │   ├── urls.py          # URL validation and YouTube playlist stripping
 │   ├── storage.py       # metadata.json of each job
 │   ├── config.py        # Downloads directory, cookies files, extractor_config.py
+│   ├── static/
+│   │   └── favicon.svg  # Page icon, also served as /favicon.ico
 │   └── templates/
 │       └── index.html   # Frontend HTML template
 ├── tests/               # pytest suite
