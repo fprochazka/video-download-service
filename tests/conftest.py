@@ -17,6 +17,7 @@ def downloads_dir(tmp_path, monkeypatch):
     # A key in the developer's environment must never reach a test, transcription tests set a fake one
     monkeypatch.delenv('GEMINI_API_KEY', raising=False)
     monkeypatch.delenv('TRANSCRIPTION_MODEL', raising=False)
+    monkeypatch.delenv('TRANSCRIPTION_PRICES', raising=False)
     FakeYoutubeDL.behaviour = None
     FakeYoutubeDL.subtitles_behaviour = None
     FakeYoutubeDL.instances = []

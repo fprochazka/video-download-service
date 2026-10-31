@@ -53,6 +53,22 @@ class TranscriptionUsage(BaseModel):
     prompt_tokens: int = 0
     output_tokens: int = 0
     thinking_tokens: int = 0
+    prompt_audio_tokens: int | None = None  # None for transcriptions stored before it was recorded
+
+
+class TranscriptionPrices(BaseModel):
+    model: str | None = None
+    input_text: float
+    input_audio: float
+    output: float
+    as_of: str | None = None
+    source: str | None = None
+
+
+class TranscriptionCost(BaseModel):
+    usd: float
+    estimated: bool = True
+    prices: TranscriptionPrices
 
 
 class TranscriptionWarning(BaseModel):
@@ -70,6 +86,8 @@ class Transcription(BaseModel):
     error_code: str | None = None
     warnings: list[TranscriptionWarning] = []
     usage: TranscriptionUsage | None = None
+    # Estimated from usage and list prices, None for a model without a known price
+    cost: TranscriptionCost | None = None
     files: list[str] = []
 
 
@@ -201,6 +219,7 @@ def status_response(download_dir: Path, metadata: dict) -> DownloadStatus:
             | {
                 'files': media_files(metadata),
                 'artifacts': job_artifacts(download_dir, metadata),
+                'transcriptions': transcription.transcriptions_with_cost(metadata),
                 'transcription_available': config.transcription_settings().available,
             }
         )

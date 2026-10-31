@@ -131,6 +131,26 @@ const EVIL_MEDIA = '"><img src=x onerror=alert(1)>.mp4';
         eval(source);
         listeners['window:load']();
         await flush();
+    } else if (scenario === 'transcription-costs') {
+        window.location.pathname = `/jobs/${jobId}`;
+        const usage = { prompt_tokens: 11293, prompt_audio_tokens: 8924, output_tokens: 4019, thinking_tokens: 0 };
+        const job = transcribableJob(jobId, {
+            'Some_video-abc.mp4': {
+                status: 'completed', model: 'gemini-3.5-flash-lite', files: [], usage,
+                cost: {
+                    usd: 0.013435, estimated: true,
+                    prices: { model: 'gemini-3.5-flash-lite', input_text: 0.3, input_audio: 0.3, output: 2.5, as_of: '2026-10-30' },
+                },
+            },
+            [EVIL_MEDIA]: {
+                status: 'completed', model: 'my-<b>model</b>', files: [], cost: null,
+                usage: { prompt_tokens: 100, output_tokens: 20, thinking_tokens: 3 },
+            },
+        });
+        fetchResponse = json(200, job);
+        eval(source);
+        listeners['window:load']();
+        await flush();
     } else if (scenario === 'transcribe-click' || scenario === 'transcribe-refused') {
         window.location.pathname = `/jobs/${jobId}`;
         let requested = false;
@@ -179,6 +199,7 @@ const EVIL_MEDIA = '"><img src=x onerror=alert(1)>.mp4';
         transcribe: (m[1].match(/data-transcribe-file="([^"]*)"/) || [])[1] || null,
     }));
     result.transcriptions = [...html.matchAll(/<div class="file-transcription( failed)?">(.*?)<\/div>/g)].map((m) => m[2].replace(/<[^>]+>/g, '|'));
+    result.costs = [...html.matchAll(/<span class="file-cost" title="([^"]*)">([^<]*)<\/span>/g)].map((m) => ({ title: m[1], text: m[2] }));
     result.transcriptText = [...html.matchAll(/<pre class="transcript-text">(.*?)<\/pre>/gs)].map((m) => m[1]);
     result.deleted = [...html.matchAll(/<li class="file-deleted">(.*?)<\/li>/g)].map((m) => m[1]);
     result.html = elements.status.innerHTML;

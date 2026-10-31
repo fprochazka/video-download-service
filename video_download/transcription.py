@@ -13,11 +13,12 @@ import logging
 import math
 import re
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Protocol
 
-from video_download import audio, config, gemini, storage
+from video_download import audio, config, gemini, pricing, storage
 from video_download.gemini import ProviderError, ProviderResponse, TranscriptionRequest, Usage
 from video_download.storage import (
     INFO_FILENAME,
@@ -439,6 +440,7 @@ def request_transcription(download_dir: Path, media_name: str, model: str) -> di
             'error_code': None,
             'warnings': [],
             'usage': None,
+            'cost': None,
             # The files of the previous run stay listed until this run replaces them
             'files': current.get('files') or [],
         }
@@ -458,6 +460,26 @@ def store_result(download_dir: Path, media_name: str, files: list[str], **fields
         transcriptions = dict(metadata.get('transcriptions') or {})
         transcriptions[media_name] = (transcriptions.get(media_name) or {}) | fields | {'files': files}
         return update_metadata(download_dir, artifacts=artifacts, transcriptions=transcriptions)
+
+
+def transcriptions_with_cost(metadata: dict) -> dict:
+    """The job's transcriptions; a completed one without a cost, because it predates the cost or its model had no
+    price then, gets one estimated from its stored usage"""
+    transcriptions = {}
+    for media_name, state in (metadata.get('transcriptions') or {}).items():
+        if isinstance(state, dict) and state.get('status') == 'completed' and not state.get('cost'):
+            completed = pricing_date(state.get('completed_at'))
+            cost = pricing.estimate_stored(state.get('model'), state.get('usage'), metadata.get('duration'), completed)
+            state = state | {'cost': cost}
+        transcriptions[media_name] = state
+    return transcriptions
+
+
+def pricing_date(value: str | None):
+    try:
+        return datetime.fromisoformat(value).date() if value else datetime.now(UTC).date()
+    except ValueError:
+        return datetime.now(UTC).date()
 
 
 def mark_failed(download_dir: Path, download_id: str, media_name: str, code: str, message: str):
@@ -536,10 +558,13 @@ async def run_pipeline(download_id: str, download_dir: Path, media_name: str, me
 
         segments: list[dict] = []
         usage = Usage()
+        # Each request is priced on its own, the long-context tier of a model applies per request
+        request_usages: list[dict] = []
         unparsed = 0
         for chunk in plan_chunks(audio_path, duration):
             transcript, chunk_usage = await transcribe_chunk(provider, chunk, context, download_id)
             usage = usage.add(chunk_usage)
+            request_usages.append(asdict(chunk_usage))
             unparsed += transcript.unparsed
             segments += [shift(segment, chunk.offset) for segment in transcript.segments]
     finally:
@@ -553,11 +578,8 @@ async def run_pipeline(download_id: str, download_dir: Path, media_name: str, me
                 'message': f'{unparsed} lines of the answer were not [HH:MM:SS] transcript lines and were left out.',
             }
         )
-    usage_fields = {
-        'prompt_tokens': usage.prompt_tokens,
-        'output_tokens': usage.output_tokens,
-        'thinking_tokens': usage.thinking_tokens,
-    }
+    usage_fields = asdict(usage)
+    cost = pricing.estimate(provider.model, request_usages, datetime.now(UTC).date())
     transcript = {
         'media': media_name,
         'model': provider.model,
@@ -565,6 +587,7 @@ async def run_pipeline(download_id: str, download_dir: Path, media_name: str, me
         'subtitles_reference': context.subtitles_track,
         'segments': segments,
         'usage': usage_fields,
+        'cost': cost,
         'warnings': warnings,
         'created_at': storage.now_iso(),
     }
@@ -572,7 +595,7 @@ async def run_pipeline(download_id: str, download_dir: Path, media_name: str, me
     write_atomic(download_dir / json_name, lambda f: json.dump(transcript, f, indent=2, ensure_ascii=False))
     markdown = render_markdown(metadata.get('title'), media_name, transcript, duration)
     write_atomic(download_dir / md_name, lambda f: f.write(markdown))
-    return [md_name, json_name], warnings, usage_fields
+    return [md_name, json_name], warnings, usage_fields, cost
 
 
 async def transcribe_media_task(download_id: str, media_name: str):
@@ -587,7 +610,7 @@ async def transcribe_media_task(download_id: str, media_name: str):
             raise TranscriptionFailed('not_configured', ERROR_MESSAGES['not_configured'])
         provider = make_provider(settings)
         logger.info('Transcription %s/%s started with %s', download_id, media_name, settings.model)
-        files, warnings, usage = await run_pipeline(download_id, download_dir, media_name, metadata, provider)
+        files, warnings, usage, cost = await run_pipeline(download_id, download_dir, media_name, metadata, provider)
         store_result(
             download_dir,
             media_name,
@@ -596,12 +619,19 @@ async def transcribe_media_task(download_id: str, media_name: str):
             completed_at=storage.now_iso(),
             warnings=warnings,
             usage=usage,
+            cost=cost,
             error=None,
             error_code=None,
         )
         for warning in warnings:
             logger.warning('Transcription %s/%s: %s', download_id, media_name, warning['message'])
-        logger.info('Transcription %s/%s completed: usage=%s', download_id, media_name, usage)
+        logger.info(
+            'Transcription %s/%s completed: usage=%s cost_usd=%s',
+            download_id,
+            media_name,
+            usage,
+            cost and cost['usd'],
+        )
     except asyncio.CancelledError:
         mark_failed(download_dir, download_id, media_name, 'interrupted', ERROR_MESSAGES['interrupted'])
         raise

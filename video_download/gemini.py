@@ -32,12 +32,15 @@ class Usage:
     prompt_tokens: int = 0
     output_tokens: int = 0
     thinking_tokens: int = 0
+    # Of prompt_tokens, those of the audio; some models price audio above text
+    prompt_audio_tokens: int = 0
 
     def add(self, other: Usage) -> Usage:
         return Usage(
             self.prompt_tokens + other.prompt_tokens,
             self.output_tokens + other.output_tokens,
             self.thinking_tokens + other.thinking_tokens,
+            self.prompt_audio_tokens + other.prompt_audio_tokens,
         )
 
 
@@ -143,6 +146,11 @@ class GeminiProvider:
             prompt_tokens=(meta and meta.prompt_token_count) or 0,
             output_tokens=(meta and meta.candidates_token_count) or 0,
             thinking_tokens=(meta and meta.thoughts_token_count) or 0,
+            prompt_audio_tokens=sum(
+                detail.token_count or 0
+                for detail in (meta and meta.prompt_tokens_details) or []
+                if detail.modality == types.MediaModality.AUDIO
+            ),
         )
         block_reason = enum_name(response.prompt_feedback.block_reason) if response.prompt_feedback else None
         if not response.candidates:

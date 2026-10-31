@@ -108,7 +108,7 @@ def state_of(downloads_dir, media=MEDIA):
 def test_transcribe_writes_the_transcript_and_records_it(client, downloads_dir, genai, fake_audio, caplog):
     caplog.set_level(logging.DEBUG)
     job_dir = write_job(downloads_dir)
-    genai.answer = response(usage=(4200, 310, 0))
+    genai.answer = response(usage=(11293, 4019, 0), audio_tokens=8924)
 
     accepted = transcribe(client)
 
@@ -118,7 +118,25 @@ def test_transcribe_writes_the_transcript_and_records_it(client, downloads_dir, 
     assert state['status'] == 'completed'
     assert state['model'] == 'gemini-3.5-flash-lite'
     assert state['error_code'] is None
-    assert state['usage'] == {'prompt_tokens': 4200, 'output_tokens': 310, 'thinking_tokens': 0}
+    assert state['usage'] == {
+        'prompt_tokens': 11293,
+        'output_tokens': 4019,
+        'thinking_tokens': 0,
+        'prompt_audio_tokens': 8924,
+    }
+    # 11,293 input tokens at $0.30 and 4,019 output tokens at $2.50 per million
+    assert state['cost'] == {
+        'usd': 0.013435,
+        'estimated': True,
+        'prices': {
+            'model': 'gemini-3.5-flash-lite',
+            'input_text': 0.30,
+            'input_audio': 0.30,
+            'output': 2.50,
+            'as_of': '2026-10-30',
+            'source': 'https://ai.google.dev/gemini-api/docs/pricing',
+        },
+    }
     assert state['warnings'] == []
     assert state['files'] == ['Engine_Talk-abc.transcript.md', 'Engine_Talk-abc.transcript.json']
     assert state['started_at'] <= state['completed_at']
@@ -134,6 +152,7 @@ def test_transcribe_writes_the_transcript_and_records_it(client, downloads_dir, 
     saved = json.loads((job_dir / 'Engine_Talk-abc.transcript.json').read_text())
     assert saved['model'] == 'gemini-3.5-flash-lite'
     assert saved['usage'] == state['usage']
+    assert saved['cost'] == state['cost']
     assert saved['subtitles_reference'] == VTT
     # A segment ends where the next one starts, the last one at its start
     assert [(s['start'], s['end']) for s in saved['segments']] == [(1, 4), (4, 10), (10, 10)]
@@ -456,7 +475,7 @@ def test_retranscribing_replaces_the_outputs(client, downloads_dir, genai, fake_
     assert transcribe(client).status_code == 202
 
     state = state_of(downloads_dir)
-    assert state['usage'] == {'prompt_tokens': 10, 'output_tokens': 5, 'thinking_tokens': 0}
+    assert state['usage'] == {'prompt_tokens': 10, 'output_tokens': 5, 'thinking_tokens': 0, 'prompt_audio_tokens': 7}
     names = [a['name'] for a in read_metadata(downloads_dir, JOB_ID)['artifacts'] if a['kind'] == 'transcript']
     assert names == ['Engine_Talk-abc.transcript.md', 'Engine_Talk-abc.transcript.json']
     assert 'Second run.' in (job_dir / 'Engine_Talk-abc.transcript.md').read_text()

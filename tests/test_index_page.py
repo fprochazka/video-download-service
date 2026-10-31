@@ -219,3 +219,21 @@ def test_show_renders_the_transcript_escaped(page_script):
     assert result['transcriptText'] == ['# Some video\n\n**[00:01] Speaker 1:** &lt;script&gt;alert(1)&lt;/script&gt;']
     assert '<script>' not in result['html']
     assert '[Download][Hide][Delete Some_video-abc.transcript.md]' in result['rows'][4]
+
+
+def test_completed_transcription_shows_its_estimated_cost(page_script):
+    result = run_scenario(page_script, 'transcription-costs')
+
+    assert result['costs'] == [
+        {
+            'text': '≈ $0.013',
+            'title': '11,293 input tokens (8,924 audio), 4,019 output tokens, 0 thinking tokens. Estimated with the list '
+            'prices of gemini-3.5-flash-lite as of 2026-10-30, in USD per million tokens: 0.3 text input, 0.3 audio '
+            'input, 2.5 output.',
+        },
+        {
+            'text': '123 tokens',
+            'title': 'No price is known for my-&lt;b&gt;model&lt;/b&gt;. 100 input tokens, 20 output tokens, 3 thinking tokens',
+        },
+    ]
+    assert '<b>model' not in result['html']

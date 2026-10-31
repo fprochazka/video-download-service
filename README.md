@@ -306,7 +306,17 @@ For local development, export the variables before you start uvicorn: `set -a; .
 
 #### Cost
 
-On `gemini-3.5-flash-lite` a 6-minute video of dense dialogue took 11.3k input tokens (the audio counts 32 tokens per second) and 4.0k output tokens. At the list price of $0.30 per million input and $2.50 per million output tokens that is $0.013, about $0.13 per hour of speech. The output is most of the bill, so a recording with less speech costs less.
+On `gemini-3.5-flash-lite` a 6-minute video of dense dialogue took 11.3k input tokens (8.9k of them audio, 25 tokens per second) and 4.0k output tokens. At the list price of $0.30 per million input and $2.50 per million output tokens that is $0.013, about $0.13 per hour of speech. The output is most of the bill, so a recording with less speech costs less.
+
+The job page shows the estimated cost next to each transcript, for example `≈ $0.013`, and its tooltip shows the token counts and the prices used. Gemini reports only token counts, never an amount of money. The service multiplies the counts by a table of list prices: the standard paid tier from https://ai.google.dev/gemini-api/docs/pricing, as of 2026-10-30. Audio input and text input are priced apart where a model prices them apart, thinking tokens are priced as output, and the long-context tier of `gemini-3.1-pro-preview` applies above 200k prompt tokens. The estimate does not know about the free tier, discounts or later price changes. A model without a known price, such as `gemini-3.5-flash`, which the pricing page does not list, shows its token count only.
+
+To change a price or add a model, set `TRANSCRIPTION_PRICES` in `app.env` to a JSON object of prices in USD per million tokens, in single quotes so both Compose and a shell read it whole; it replaces the built-in prices of the models it names:
+
+```
+TRANSCRIPTION_PRICES='{"gemini-3.5-flash": {"input": 1.50, "output": 9.00, "as_of": "2026-11-01"}}'
+```
+
+Each model takes `input` and `output`, and optionally `input_audio` (when audio input costs more than text), `long_context_tokens` with `input_long` and `output_long`, and `as_of`. For an announced price change, give a list of such objects and add `valid_from` (an ISO date) to the later one. A transcription uses the price that applied on the day it ran. Transcriptions made before the cost was recorded get an estimate in `/status` from their stored usage; their usage has no audio count, so the service assumes 25 audio tokens per second of the media.
 
 The default comes from a comparison on that video, scored against its manual subtitles:
 
@@ -385,6 +395,7 @@ video-download/
 │   ├── worker.py        # In-process job queues with a concurrency limit per lane
 │   ├── transcription.py # Transcription pipeline: prompt, answer parsing, checks, transcript files
 │   ├── gemini.py        # Gemini Developer API calls (Files API upload, generate_content)
+│   ├── pricing.py       # List prices and the estimated cost of a transcription
 │   ├── audio.py         # ffmpeg audio extraction and ffprobe duration
 │   ├── ytdlp.py         # yt-dlp options and the files and metadata a download produced
 │   ├── subtitles.py     # Which subtitle tracks a job downloads
@@ -467,7 +478,8 @@ Each download creates a `metadata.json` file with:
       "error": null,
       "error_code": null,
       "warnings": [],
-      "usage": {"prompt_tokens": 11293, "output_tokens": 4019, "thinking_tokens": 0},
+      "usage": {"prompt_tokens": 11293, "prompt_audio_tokens": 8924, "output_tokens": 4019, "thinking_tokens": 0},
+      "cost": {"usd": 0.013435, "estimated": true, "prices": {"model": "gemini-3.5-flash-lite", "input_text": 0.3, "input_audio": 0.3, "output": 2.5, "as_of": "2026-10-30", "source": "https://ai.google.dev/gemini-api/docs/pricing"}},
       "files": ["Video_Title-dQw4w9WgXcQ.transcript.md", "Video_Title-dQw4w9WgXcQ.transcript.json"]
     }
   },
@@ -495,7 +507,7 @@ Each download creates a `metadata.json` file with:
 
 `files` lists only the media; `artifacts` lists every downloadable file of the job with its `kind` (`media`, `subtitle`, `info`, `transcript`). A transcript names its media file in `media`. For a subtitle, `lang` is yt-dlp's track key (`en`, `en-GB`, `cs-orig`) and `auto` is `true` for automatic captions. `deleted_files` keeps a record of every file removed from `artifacts`; `reason` is `user` for the delete button and `gc` for the [garbage collection](#garbage-collection), which also records leftover partial downloads with `kind` `partial`. Jobs created before artifacts existed have no `artifacts` and no `completed_at`; `/status` lists their media files as artifacts.
 
-`transcriptions` holds one entry per media file that was ever transcribed, keyed by the media file name; `status` is `pending`, `running`, `completed` or `failed`, see [Transcription](#transcription) for the warnings and error codes. `/status` also returns `transcription_available`, `true` when the server has a Gemini API key.
+`transcriptions` holds one entry per media file that was ever transcribed, keyed by the media file name; `status` is `pending`, `running`, `completed` or `failed`, see [Transcription](#transcription) for the warnings and error codes. `cost` is the estimate described under [Cost](#cost), `null` for a model without a known price. `/status` also returns `transcription_available`, `true` when the server has a Gemini API key.
 
 YouTube jobs also carry `used_youtube_cookies` (`true` when the retry with `youtube_cookies.txt` ran).
 

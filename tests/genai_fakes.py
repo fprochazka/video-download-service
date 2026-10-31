@@ -19,11 +19,17 @@ def transcript_lines(lines=None) -> str:
     )
 
 
-def response(text: str | None = None, finish_reason='STOP', usage=(1000, 200, 0), block_reason=None):
+def response(text: str | None = None, finish_reason='STOP', usage=(1000, 200, 0), block_reason=None, audio_tokens=None):
+    """audio_tokens of the prompt tokens are audio, the rest text; by default three quarters"""
     prompt_tokens, output_tokens, thinking_tokens = usage
+    audio = prompt_tokens * 3 // 4 if audio_tokens is None else audio_tokens
     data = {
         'usage_metadata': {
             'prompt_token_count': prompt_tokens,
+            'prompt_tokens_details': [
+                {'modality': 'TEXT', 'token_count': prompt_tokens - audio},
+                {'modality': 'AUDIO', 'token_count': audio},
+            ],
             'candidates_token_count': output_tokens,
             'thoughts_token_count': thinking_tokens,
         },
