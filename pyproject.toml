@@ -2,7 +2,7 @@
 name = "video-download"
 version = "0.1.0"
 description = "Add your description here"
-requires-python = ">=3.12"
+requires-python = ">=3.14"
 dependencies = [
     "aiofiles>=25.1.0",
     "fastapi>=0.162.0",
@@ -20,7 +20,7 @@ dev = [
 
 [tool.ruff]
 line-length = 120
-target-version = "py312"
+target-version = "py314"
 
 [tool.ruff.lint]
 select = [
