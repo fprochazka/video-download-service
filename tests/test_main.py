@@ -1,5 +1,6 @@
 import io
 import json
+import uuid
 
 import pytest
 from fastapi.testclient import TestClient
@@ -301,6 +302,33 @@ def test_only_listed_media_files_are_served(client, downloads_dir, filename):
     response = client.get(f'/downloads/{download_id}/{filename}')
 
     assert response.status_code == 404
+
+
+def test_new_jobs_get_uuid7_ids(client):
+    FakeYoutubeDL.behaviour = lambda opts, url: None
+
+    download_id = client.post('/download', data={'url': VIDEO_URL}).json()['download_id']
+
+    assert uuid.UUID(download_id).version == 7
+
+
+@pytest.mark.parametrize(
+    'download_id',
+    [
+        '0b7f6c1e-3f4a-4d2b-9c8e-1a2b3c4d5e6f',  # UUIDv4, the format of jobs created before UUIDv7
+        '019a3b2c-4d5e-7f00-8a1b-2c3d4e5f6a7b',
+        '00000000-0000-0000-0000-000000000000',  # unknown jobs get the page too, it shows "Download not found"
+    ],
+)
+def test_job_page_is_served_for_any_uuid(client, download_id):
+    response = client.get(f'/jobs/{download_id}')
+
+    assert response.status_code == 200
+    assert response.text == client.get('/').text
+
+
+def test_job_page_rejects_malformed_id(client):
+    assert client.get('/jobs/not-a-uuid').status_code == 422
 
 
 def test_status_of_unknown_or_malformed_id(client):

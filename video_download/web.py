@@ -63,13 +63,21 @@ async def lifespan(_app: FastAPI):
 app = FastAPI(title='Video Download Service', lifespan=lifespan)
 
 
+def index_page() -> HTMLResponse:
+    with open(TEMPLATES_DIR / 'index.html', encoding='utf-8') as f:
+        return HTMLResponse(content=f.read())
+
+
 @app.get('/', response_class=HTMLResponse)
 async def index():
     """Serve the main page with download form"""
-    template_path = TEMPLATES_DIR / 'index.html'
-    with open(template_path, encoding='utf-8') as f:
-        html_content = f.read()
-    return HTMLResponse(content=html_content)
+    return index_page()
+
+
+@app.get('/jobs/{download_id}', response_class=HTMLResponse)
+async def job_page(download_id: uuid.UUID):
+    """Serve the page for one job; the page reads the id from the path and polls /status, which 404s an unknown id"""
+    return index_page()
 
 
 @app.post('/download')

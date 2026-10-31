@@ -25,7 +25,8 @@ logger = logging.getLogger(__name__)
 
 def create_job(url: str, download_url: str, extractor: str) -> str:
     """Create the job directory with a pending metadata.json and return the job's id"""
-    download_id = str(uuid.uuid4())
+    # Time-ordered, so job directories sort by creation; ids of older jobs are UUIDv4
+    download_id = str(uuid.uuid7())
     download_dir = config.DOWNLOADS_DIR / download_id
     download_dir.mkdir(parents=True, exist_ok=True)
 

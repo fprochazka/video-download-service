@@ -8,7 +8,7 @@ A simple web service for downloading videos from various platforms using yt-dlp 
 - **Asynchronous downloads** - Submit URL and get UUID immediately, download continues in background
 - **Real-time status polling** - Frontend polls every 5 seconds to check download progress
 - **UUID-based privacy** - Each download gets a unique UUID, files are not publicly listable
-- **Persistent status** - Download ID saved in localStorage, resumes polling on page reload
+- **Shareable job page** - Each download has its own page at `/jobs/{download_id}`, a reload or a shared link shows the same job
 - **Metadata tracking** - Comprehensive video metadata saved to JSON for each download
 - **URL-safe filenames** - yt-dlp's `restrictfilenames` keeps names ASCII without spaces, the video id keeps them unique
 - **Best quality** - Downloads the best video and audio streams and merges them into mp4 with ffmpeg
@@ -49,6 +49,8 @@ uv run pytest -q
 ```
 
 This ensures consistent code style and catches common issues.
+
+The frontend tests run the page script in Node.js against a stubbed DOM, pytest skips them when `node` is not installed.
 
 The downloads directory defaults to `./downloads` and can be changed with the `DOWNLOADS_DIR` environment variable.
 
@@ -163,16 +165,20 @@ docker logs ts-video-download
 1. Open http://localhost:8000 in your browser
 2. Paste a video URL (e.g., YouTube, Vimeo, etc.)
 3. Click "Download"
-4. Server returns UUID immediately and starts download in background
-5. Page polls status every 5 seconds with spinner
+4. Server returns the download ID immediately and starts the download in the background
+5. Browser opens the job page `/jobs/{download_id}`, which polls the status every 5 seconds with a spinner
 6. When complete, download links appear
 7. Click on file links to download videos
+
+The job page keeps the form, so you can submit another URL from it. Bookmark or share the job page URL to come back to the download later.
 
 ### Privacy & Security
 
 - **No public file listing** - Users can only access downloads if they know the UUID
 - **UUID-based access control** - Each download directory uses a unique identifier
-- **Download ID persistence** - Stored in browser localStorage, survives page reloads
+- **Download ID in the job page URL** - Anyone with the `/jobs/{download_id}` link sees the job and its files
+
+New jobs get a UUIDv7 ID. Its first 48 bits are the creation time, so an ID reveals when the job was created. The other 74 bits are random, which keeps IDs unguessable. Jobs created earlier have UUIDv4 IDs and keep working.
 
 ### Handling Age-Restricted/Private Content
 
@@ -296,6 +302,8 @@ video-download/
 ### Public Endpoints
 
 - `GET /` - Main web interface
+- `GET /jobs/{download_id}` - Web interface for one job, it polls `/status/{download_id}`
+  - Accepts any UUID version; 422 for a malformed ID, an unknown ID gets the page with "Download not found"
 - `POST /download` - Initiate download (returns UUID immediately)
   - Accepts: `url` form parameter
   - Returns: `{"download_id": "uuid"}`
@@ -353,8 +361,8 @@ YouTube jobs also carry `used_youtube_cookies` (`true` when the retry with `yout
 ## How It Works
 
 1. **Submit** - User submits URL via form
-2. **UUID Generation** - Server creates unique download directory
-3. **Immediate Response** - UUID returned to client, HTTP request completes
+2. **ID Generation** - Server creates a download directory named by a new UUIDv7
+3. **Immediate Response** - ID returned to client, HTTP request completes, the browser opens `/jobs/{uuid}`
 4. **Background Task** - FastAPI BackgroundTasks handles actual download
 5. **Status Updates** - Metadata file updated as download progresses
 6. **Polling** - Frontend polls `/status/{uuid}` every 5 seconds
@@ -365,5 +373,5 @@ YouTube jobs also carry `used_youtube_cookies` (`true` when the retry with `yout
 - **FastAPI** - Web framework with background tasks
 - **yt-dlp** - Video download library
 - **Uvicorn** - ASGI server
-- **HTML/CSS/JavaScript** - Frontend with polling and localStorage
+- **HTML/CSS/JavaScript** - Frontend with polling
 - **Python asyncio** - Async background processing

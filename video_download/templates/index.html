@@ -294,7 +294,6 @@
 
         function showError(html) {
             stopPolling();
-            clearDownloadId();
             submitBtn.disabled = false;
             cancelBtn.style.display = 'none';
             statusDiv.className = 'status error';
@@ -311,25 +310,14 @@
             return fallback;
         }
 
-        function saveDownloadId(downloadId) {
-            localStorage.setItem('currentDownloadId', downloadId);
-        }
-
-        function getDownloadId() {
-            return localStorage.getItem('currentDownloadId');
-        }
-
-        function clearDownloadId() {
-            localStorage.removeItem('currentDownloadId');
+        // The job page is /jobs/{download_id}, the id in the path keeps the reference across reloads and shares
+        function jobIdFromPath() {
+            const match = window.location.pathname.match(/^\/jobs\/([^/]+)\/?$/);
+            return match ? decodeURIComponent(match[1]) : null;
         }
 
         function resetUI() {
             stopPolling();
-
-            // Clear localStorage
-            clearDownloadId();
-
-            // Reset UI
             statusDiv.className = 'status';
             statusDiv.innerHTML = '';
             submitBtn.disabled = false;
@@ -365,7 +353,6 @@
                     cancelBtn.style.display = 'inline-block';
                 } else if (status.status === 'completed') {
                     stopPolling();
-                    clearDownloadId();
                     submitBtn.disabled = false;
                     cancelBtn.style.display = 'none';
                     urlInput.value = ''; // Clear the input field
@@ -501,6 +488,9 @@
             const url = urlInput.value.trim();
             if (!url) return;
 
+            // On a job page, the poll of the shown job must not overwrite the state of the new submission
+            stopPolling();
+
             // Show initial loading state
             statusDiv.className = 'status loading';
             statusDiv.innerHTML = '<div><span class="spinner"></span>Initiating download...</div>';
@@ -521,34 +511,26 @@
                 }
 
                 const result = await response.json();
-                const downloadId = result.download_id;
-
-                // Save download ID
-                saveDownloadId(downloadId);
-
-                // Start polling for status every 5 seconds
-                pollInterval = setInterval(() => pollStatus(downloadId), 5000);
-
-                // Also poll immediately
-                pollStatus(downloadId);
-
+                window.location.assign(`/jobs/${encodeURIComponent(result.download_id)}`);
             } catch (error) {
                 showError(`<strong>Error:</strong> ${escapeHtml(error.message)}`);
             }
         });
 
-        // Cancel button handler
+        // Stops watching the job, the download itself continues on the server
         cancelBtn.addEventListener('click', () => {
-            resetUI();
+            if (jobIdFromPath()) {
+                window.location.assign('/');
+            } else {
+                resetUI();
+            }
         });
 
-        // On page load, check if there's an ongoing download
         window.addEventListener('load', () => {
-            const downloadId = getDownloadId();
+            const downloadId = jobIdFromPath();
             if (downloadId) {
                 statusDiv.className = 'status loading';
-                statusDiv.innerHTML = '<div><span class="spinner"></span>Resuming download status check...</div>';
-                submitBtn.disabled = true;
+                statusDiv.innerHTML = '<div><span class="spinner"></span>Checking download status...</div>';
                 cancelBtn.style.display = 'inline-block';
 
                 // Start polling
