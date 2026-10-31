@@ -362,11 +362,12 @@
                     let filesHtml = '<strong>Download completed!</strong>';
 
                     // File list
-                    if (status.files && status.files.length > 0) {
+                    const artifacts = status.artifacts || [];
+                    if (artifacts.length > 0) {
                         filesHtml += '<ul class="files-list">';
-                        status.files.forEach(file => {
-                            const href = `/downloads/${encodeURIComponent(status.download_id)}/${encodeURIComponent(file)}`;
-                            filesHtml += `<li><a href="${escapeHtml(href)}" download>${escapeHtml(file)}</a></li>`;
+                        artifacts.forEach(artifact => {
+                            const href = `/downloads/${encodeURIComponent(status.download_id)}/${encodeURIComponent(artifact.name)}`;
+                            filesHtml += `<li><a href="${escapeHtml(href)}" download>${escapeHtml(artifact.name)}</a></li>`;
                         });
                         filesHtml += '</ul>';
                     }

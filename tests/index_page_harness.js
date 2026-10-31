@@ -45,6 +45,21 @@ const flush = () => new Promise((resolve) => setTimeout(resolve, 0));
         eval(source);
         listeners['window:load']();
         await flush();
+    } else if (scenario === 'job-completed') {
+        window.location.pathname = `/jobs/${jobId}`;
+        fetchResponse = json(200, {
+            status: 'completed', download_id: jobId, title: 'Some <b>video</b>',
+            files: ['Some_video-abc.mp4'],
+            artifacts: [
+                { name: 'Some_video-abc.mp4', kind: 'media', size: 52428800 },
+                { name: 'Some_video-abc.en.vtt', kind: 'subtitle', size: 41000, lang: 'en', auto: false },
+                { name: 'Some_video-abc.cs-orig.vtt', kind: 'subtitle', size: 39000, lang: 'cs-orig', auto: true },
+                { name: 'info.json', kind: 'info', size: 350000 },
+            ],
+        });
+        eval(source);
+        listeners['window:load']();
+        await flush();
     } else if (scenario === 'job-not-found') {
         window.location.pathname = `/jobs/${jobId}`;
         fetchResponse = json(404, { detail: 'Download not found' });
@@ -55,6 +70,8 @@ const flush = () => new Promise((resolve) => setTimeout(resolve, 0));
         throw new Error(`Unknown scenario ${scenario}`);
     }
     result.status = { className: elements.status.className, text: elements.status.innerHTML.replace(/<[^>]+>/g, '') };
+    result.links = [...elements.status.innerHTML.matchAll(/<a href="([^"]+)" download>/g)].map((m) => m[1]);
+    result.html = elements.status.innerHTML;
     result.submitDisabled = elements.submitBtn.disabled;
     console.log(JSON.stringify(result));
 })();

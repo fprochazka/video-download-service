@@ -104,7 +104,7 @@ def test_successful_download_lists_only_media_files(client, downloads_dir):
     assert metadata['error'] is None
 
     (ydl,) = FakeYoutubeDL.instances
-    assert ydl.calls == [(VIDEO_URL, True)]
+    assert ydl.calls == [(VIDEO_URL, False)]
 
     status = client.get(f'/status/{download_id}').json()
     assert status['status'] == 'completed'
@@ -555,3 +555,128 @@ def test_legacy_job_does_not_list_or_serve_its_log(client, downloads_dir):
     assert status['files'] == ['Old_Video-abc.mp4']
     assert client.get(f'/downloads/{LEGACY_JOB_ID}/Old_Video-abc.mp4').content == b'old video'
     assert client.get(f'/downloads/{LEGACY_JOB_ID}/download.log').status_code == 404
+
+
+def youtube_video(opts, url):
+    """A YouTube video in Czech with automatic captions only, like most videos without uploaded subtitles"""
+    return {
+        'id': 'abc',
+        'title': 'Czech Video',
+        'language': None,
+        'subtitles': {'live_chat': [{'ext': 'json'}]},
+        'automatic_captions': {key: [{'ext': 'vtt'}] for key in ('cs-orig', 'cs', 'en', 'de', 'fr')},
+        'requested_downloads': [{'filepath': write_media(opts, 'Czech_Video-abc.mp4')}],
+    }
+
+
+def write_requested_subtitles(params, info):
+    for pattern in params['subtitleslangs']:
+        key = pattern.replace('\\', '')
+        write_media(params, f'Czech_Video-abc.{key}.vtt', f'WEBVTT {key}'.encode())
+
+
+def test_download_extracts_once_and_fetches_subtitles_and_details(client, downloads_dir):
+    FakeYoutubeDL.behaviour = youtube_video
+    FakeYoutubeDL.subtitles_behaviour = write_requested_subtitles
+
+    download_id = client.post('/download', data={'url': VIDEO_URL}).json()['download_id']
+
+    (ydl,) = FakeYoutubeDL.instances
+    assert ydl.calls == [(VIDEO_URL, False)]
+    media_pass, subtitles_pass = ydl.processed
+    assert media_pass['writesubtitles'] is False
+    assert media_pass['writeautomaticsub'] is False
+    assert media_pass['updatetime'] is False
+    assert not media_pass.get('skip_download')
+    assert subtitles_pass['skip_download'] is True
+    assert subtitles_pass['subtitleslangs'] == ['cs\\-orig', 'en']
+    assert subtitles_pass['subtitlesformat'] == 'vtt/best'
+
+    metadata = read_metadata(downloads_dir, download_id)
+    assert metadata['status'] == 'completed'
+    assert metadata['files'] == ['Czech_Video-abc.mp4']
+    assert metadata['subtitles_error'] is None
+    assert metadata['completed_at'] >= metadata['created_at']
+    assert metadata['artifacts'] == [
+        {'name': 'Czech_Video-abc.mp4', 'kind': 'media', 'size': 5},
+        {'name': 'Czech_Video-abc.cs-orig.vtt', 'kind': 'subtitle', 'size': 14, 'lang': 'cs-orig', 'auto': True},
+        {'name': 'Czech_Video-abc.en.vtt', 'kind': 'subtitle', 'size': 9, 'lang': 'en', 'auto': True},
+        {'name': 'info.json', 'kind': 'info', 'size': (downloads_dir / download_id / 'info.json').stat().st_size},
+    ]
+    info = json.loads((downloads_dir / download_id / 'info.json').read_text())
+    assert info['title'] == 'Czech Video'
+
+    status = client.get(f'/status/{download_id}').json()
+    assert [a['name'] for a in status['artifacts']] == [a['name'] for a in metadata['artifacts']]
+    assert status['completed_at'] == metadata['completed_at']
+    assert client.get(f'/downloads/{download_id}/Czech_Video-abc.en.vtt').content == b'WEBVTT en'
+    assert client.get(f'/downloads/{download_id}/info.json').json()['id'] == 'abc'
+    assert client.get(f'/downloads/{download_id}/metadata.json').status_code == 404
+    assert client.get(f'/downloads/{download_id}/download.log').status_code == 404
+
+
+def test_failed_subtitles_keep_the_job_completed(client, downloads_dir, caplog):
+    def failing_subtitles(params, info):
+        write_media(params, 'Czech_Video-abc.cs-orig.vtt', b'WEBVTT')
+        write_media(params, 'Czech_Video-abc.en.vtt.part', b'WEB')
+        raise_like_ytdlp(ExtractorError("Unable to download video subtitles for 'en': HTTP Error 429"))
+
+    FakeYoutubeDL.behaviour = youtube_video
+    FakeYoutubeDL.subtitles_behaviour = failing_subtitles
+
+    download_id = client.post('/download', data={'url': VIDEO_URL}).json()['download_id']
+
+    metadata = read_metadata(downloads_dir, download_id)
+    assert metadata['status'] == 'completed'
+    assert metadata['error'] is None
+    assert metadata['files'] == ['Czech_Video-abc.mp4']
+    assert 'HTTP Error 429' in metadata['subtitles_error']
+    assert [(a['name'], a['kind']) for a in metadata['artifacts']] == [
+        ('Czech_Video-abc.mp4', 'media'),
+        ('Czech_Video-abc.cs-orig.vtt', 'subtitle'),
+        ('info.json', 'info'),
+    ]
+    assert any(download_id in r.getMessage() and 'subtitles failed' in r.getMessage() for r in caplog.records)
+    assert 'Subtitles failed' in (downloads_dir / download_id / 'download.log').read_text()
+
+
+def test_video_without_subtitles_skips_the_subtitles_pass(client, downloads_dir):
+    FakeYoutubeDL.behaviour = lambda opts, url: {
+        'id': 'x',
+        'requested_downloads': [{'filepath': write_media(opts, 'video-x.mp4')}],
+    }
+    FakeYoutubeDL.subtitles_behaviour = lambda params, info: pytest.fail('no subtitles to fetch')
+
+    download_id = client.post('/download', data={'url': 'https://www.instagram.com/p/ABC123/'}).json()['download_id']
+
+    (ydl,) = FakeYoutubeDL.instances
+    assert len(ydl.processed) == 1
+    metadata = read_metadata(downloads_dir, download_id)
+    assert [a['kind'] for a in metadata['artifacts']] == ['media', 'info']
+
+
+def test_youtube_cookies_retry_fetches_subtitles_with_the_cookies(client, downloads_dir):
+    (downloads_dir.parent / 'youtube_cookies.txt').write_text(YOUTUBE_COOKIES)
+    FakeYoutubeDL.behaviour = fail_without_cookies_then(lambda opts: youtube_video(opts, VIDEO_URL))
+    FakeYoutubeDL.subtitles_behaviour = write_requested_subtitles
+
+    download_id = client.post('/download', data={'url': VIDEO_URL}).json()['download_id']
+
+    metadata = read_metadata(downloads_dir, download_id)
+    assert metadata['status'] == 'completed'
+    assert metadata['used_youtube_cookies'] is True
+    assert [a['kind'] for a in metadata['artifacts']] == ['media', 'subtitle', 'subtitle', 'info']
+    first, second = FakeYoutubeDL.instances
+    assert first.processed == []
+    assert [p.get('skip_download') for p in second.processed] == [None, True]
+
+
+def test_legacy_job_lists_its_media_as_artifacts(client, downloads_dir):
+    write_legacy_job(downloads_dir)
+
+    status = client.get(f'/status/{LEGACY_JOB_ID}').json()
+
+    assert status['artifacts'] == [
+        {'name': 'Old_Video-abc.mp4', 'kind': 'media', 'size': 9, 'lang': None, 'auto': None}
+    ]
+    assert status['completed_at'] is None

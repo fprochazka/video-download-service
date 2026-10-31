@@ -12,6 +12,7 @@ A simple web service for downloading videos from various platforms using yt-dlp 
 - **Metadata tracking** - Comprehensive video metadata saved to JSON for each download
 - **URL-safe filenames** - yt-dlp's `restrictfilenames` keeps names ASCII without spaces, the video id keeps them unique
 - **Best quality** - Downloads the best video and audio streams and merges them into mp4 with ffmpeg
+- **Subtitles and details** - Each job also downloads the subtitles in the video's own language and in English, and the video details yt-dlp extracted (`info.json`). A manual subtitle track wins over automatic captions of the same language; of the automatic captions only the speech recognition track (YouTube's `<lang>-orig`) and the English one are taken, never the ~100 machine translations. A failed subtitle download does not fail the job, the error is in `subtitles_error`
 - **Single videos only** - A YouTube link to a video inside a playlist or mix downloads just that video; playlist and channel links are rejected. Other sites are untouched, so Instagram carousels still download all their items
 - **Error handling** - Failed downloads are tracked in metadata with the error message and a machine-readable `error_code`, and logged to the service log
 - **Download status states**:
@@ -282,6 +283,7 @@ video-download/
 │   ├── web.py           # FastAPI app and routes
 │   ├── jobs.py          # Job creation, the background download task, the startup sweep
 │   ├── ytdlp.py         # yt-dlp options and the files and metadata a download produced
+│   ├── subtitles.py     # Which subtitle tracks a job downloads
 │   ├── errors.py        # Classification of failures into error codes
 │   ├── urls.py          # URL validation and YouTube playlist stripping
 │   ├── storage.py       # metadata.json of each job
@@ -293,7 +295,9 @@ video-download/
 │   └── {uuid}/
 │       ├── metadata.json    # Download status and video metadata
 │       ├── download.log     # yt-dlp output for this download
-│       └── Video_Title-id.mp4   # Downloaded video (URL-safe filename)
+│       ├── info.json        # yt-dlp's video details
+│       ├── Video_Title-id.mp4   # Downloaded video (URL-safe filename)
+│       └── Video_Title-id.en.vtt   # Subtitles, one file per track
 └── pyproject.toml       # UV project configuration
 ```
 
@@ -311,7 +315,7 @@ video-download/
 - `GET /status/{download_id}` - Check download status
   - Returns: Status object with download state, files, metadata, errors; 404 for an unknown id, 422 for a malformed one
 - `GET /downloads/{download_id}/{filename}` - Download a specific file
-  - Serves only the media files listed in the job's `files`; `metadata.json` and `download.log` are not public
+  - Serves only the files listed in the job's `artifacts`; `metadata.json` and `download.log` are not public
 
 ### Metadata Structure
 
@@ -325,11 +329,18 @@ Each download creates a `metadata.json` file with:
   "extractor": "Youtube",
   "status": "completed|downloading|pending|failed",
   "files": ["Video_Title-dQw4w9WgXcQ.mp4"],
+  "artifacts": [
+    {"name": "Video_Title-dQw4w9WgXcQ.mp4", "kind": "media", "size": 52428800},
+    {"name": "Video_Title-dQw4w9WgXcQ.en.vtt", "kind": "subtitle", "size": 41000, "lang": "en", "auto": false},
+    {"name": "info.json", "kind": "info", "size": 350000}
+  ],
+  "subtitles_error": null,
   "error": null,
   "error_code": null,
   "error_type": null,
   "created_at": "2025-01-14T12:00:00",
   "updated_at": "2025-01-14T12:05:00",
+  "completed_at": "2025-01-14T12:05:00",
   "title": "Video Title",
   "duration": 123,
   "uploader": "Channel Name",
@@ -342,6 +353,8 @@ Each download creates a `metadata.json` file with:
   "resolution": "1920x1080"
 }
 ```
+
+`files` lists only the media; `artifacts` lists every downloadable file of the job with its `kind` (`media`, `subtitle`, `info`). For a subtitle, `lang` is yt-dlp's track key (`en`, `en-GB`, `cs-orig`) and `auto` is `true` for automatic captions. Jobs created before artifacts existed have no `artifacts` and no `completed_at`; `/status` lists their media files as artifacts.
 
 YouTube jobs also carry `used_youtube_cookies` (`true` when the retry with `youtube_cookies.txt` ran).
 

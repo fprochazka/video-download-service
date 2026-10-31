@@ -12,7 +12,15 @@ LOG_FILENAME = 'download.log'
 # Job files that are never offered for download; jobs created before download.log was excluded list it in files
 PRIVATE_FILENAMES = frozenset({METADATA_FILENAME, LOG_FILENAME})
 
+# yt-dlp's info dict of the video, offered for download as the job's details
+INFO_FILENAME = 'info.json'
+
 ACTIVE_STATUSES = ('pending', 'downloading')
+
+# Kinds of files in a job's artifacts list; files keeps listing only the media names for older clients
+MEDIA = 'media'
+SUBTITLE = 'subtitle'
+INFO = 'info'
 
 
 def now_iso() -> str:
@@ -58,3 +66,22 @@ def update_metadata(download_dir: Path, **fields) -> dict:
 def media_files(metadata: dict) -> list[str]:
     """The job's media files from metadata, without the private files that old jobs listed"""
     return [name for name in metadata.get('files') or [] if name not in PRIVATE_FILENAMES]
+
+
+def artifact(download_dir: Path, name: str, kind: str, **extra) -> dict:
+    """An entry of the job's artifacts list, sized from the file on disk"""
+    path = download_dir / name
+    size = path.stat().st_size if path.is_file() else None
+    return {'name': name, 'kind': kind, 'size': size, **extra}
+
+
+def job_artifacts(download_dir: Path, metadata: dict) -> list[dict]:
+    """The job's downloadable files; jobs from before artifacts existed have only their media files"""
+    if 'artifacts' in metadata:
+        return [a for a in metadata['artifacts'] if a.get('name') not in PRIVATE_FILENAMES]
+    return [artifact(download_dir, name, MEDIA) for name in media_files(metadata)]
+
+
+def write_json(path: Path, data: dict):
+    with open(path, 'w', encoding='utf-8') as f:
+        json.dump(data, f, ensure_ascii=False)

@@ -11,7 +11,7 @@ from pydantic import BaseModel
 
 from video_download import config
 from video_download.jobs import create_job, download_video_task, fail_interrupted_downloads
-from video_download.storage import load_metadata, media_files
+from video_download.storage import job_artifacts, load_metadata, media_files
 from video_download.urls import InvalidDownloadUrl, resolve_download_url
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -23,6 +23,14 @@ class DownloadInitResponse(BaseModel):
     download_id: str
 
 
+class Artifact(BaseModel):
+    name: str
+    kind: str  # media, subtitle, info
+    size: int | None = None
+    lang: str | None = None  # subtitle track key, e.g. en, en-US, cs-orig
+    auto: bool | None = None  # subtitle is automatic captions
+
+
 class DownloadStatus(BaseModel):
     download_id: str
     status: str  # pending, downloading, completed, failed
@@ -30,12 +38,15 @@ class DownloadStatus(BaseModel):
     download_url: str | None = None
     extractor: str | None = None
     files: list[str] = []
+    artifacts: list[Artifact] = []
     error: str | None = None
     error_code: str | None = None
     error_type: str | None = None
     used_youtube_cookies: bool | None = None
+    subtitles_error: str | None = None
     created_at: str
     updated_at: str
+    completed_at: str | None = None
     # Video metadata fields (optional)
     title: str | None = None
     duration: int | None = None
@@ -98,19 +109,22 @@ async def download_video(background_tasks: BackgroundTasks, url: str = Form(...)
 @app.get('/status/{download_id}')
 async def get_download_status(download_id: uuid.UUID):
     """Get the status of a download"""
-    metadata = load_metadata(config.DOWNLOADS_DIR / str(download_id))
+    download_dir = config.DOWNLOADS_DIR / str(download_id)
+    metadata = load_metadata(download_dir)
     if not metadata:
         raise HTTPException(status_code=404, detail='Download not found')
 
-    return DownloadStatus(**(metadata | {'files': media_files(metadata)}))
+    return DownloadStatus(
+        **(metadata | {'files': media_files(metadata), 'artifacts': job_artifacts(download_dir, metadata)})
+    )
 
 
 @app.get('/downloads/{download_id}/{filename}')
 async def get_download_file(download_id: uuid.UUID, filename: str):
-    """Serve a downloaded media file, only the ones listed in the job's metadata"""
+    """Serve a file of the job, only the artifacts listed in its metadata; metadata.json and download.log stay private"""
     download_dir = config.DOWNLOADS_DIR / str(download_id)
     metadata = load_metadata(download_dir)
-    if not metadata or filename not in media_files(metadata):
+    if not metadata or filename not in {a['name'] for a in job_artifacts(download_dir, metadata)}:
         raise HTTPException(status_code=404, detail='File not found')
 
     path = (download_dir / filename).resolve()

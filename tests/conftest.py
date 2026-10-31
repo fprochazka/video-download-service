@@ -14,6 +14,7 @@ def downloads_dir(tmp_path, monkeypatch):
     monkeypatch.setattr(config, 'load_user_config', lambda: ({}, {}))
     monkeypatch.setattr(yt_dlp, 'YoutubeDL', FakeYoutubeDL)
     FakeYoutubeDL.behaviour = None
+    FakeYoutubeDL.subtitles_behaviour = None
     FakeYoutubeDL.instances = []
     return directory
 

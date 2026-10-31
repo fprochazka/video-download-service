@@ -1,12 +1,14 @@
 """yt-dlp options and the translation of its results into job files and metadata"""
 
 import logging
+from dataclasses import dataclass
 from pathlib import Path
 
 import yt_dlp
 
-from video_download import config
-from video_download.storage import LOG_FILENAME, METADATA_FILENAME
+from video_download import config, subtitles
+from video_download.errors import classify_error
+from video_download.storage import LOG_FILENAME, PRIVATE_FILENAMES
 
 # Files yt-dlp leaves behind while (or after failing at) downloading, never offered to the user
 INCOMPLETE_SUFFIXES = ('.part', '.ytdl', '.temp')
@@ -48,6 +50,11 @@ def build_ydl_opts(download_dir: Path, ytdlp_logger: logging.Logger, instagram_c
             'paths': {'home': str(download_dir)},
             'outtmpl': OUTPUT_TEMPLATE,
             'logger': ytdlp_logger,
+            # yt-dlp would set the file's mtime to the server's Last-Modified, years old for a fresh download
+            'updatetime': False,
+            # Subtitles are downloaded in a separate pass, see run_ytdlp
+            'writesubtitles': False,
+            'writeautomaticsub': False,
         }
     )
 
@@ -59,13 +66,55 @@ def build_ydl_opts(download_dir: Path, ytdlp_logger: logging.Logger, instagram_c
     return ydl_opts
 
 
-def run_ytdlp(ydl_opts: dict, url: str) -> dict | None:
+@dataclass
+class DownloadResult:
+    info: dict | None
+    # Paths yt-dlp reported for the media, before the subtitles pass processes the info again
+    media_filepaths: list[str]
+    # yt-dlp's info dict made JSON-serialisable, what --write-info-json would write
+    clean_info: dict | None = None
+    subtitle_tracks: dict[str, bool] | None = None
+    subtitles_error: str | None = None
+
+
+def run_ytdlp(ydl_opts: dict, url: str) -> DownloadResult:
+    """Extract once, download the media, then the subtitles from the same extraction.
+
+    The subtitles get their own pass because with ignoreerrors off a failed subtitle raises, and yt-dlp writes
+    subtitles before the media, so one failed track would fail the whole job. A failed subtitles pass is recorded in
+    the result and never raises.
+    """
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        return ydl.extract_info(url, download=True)
+        info = ydl.extract_info(url, download=False)
+        if info is None:
+            return DownloadResult(None, [])
+        tracks = subtitles.select_subtitle_tracks(info)
+        info = ydl.process_ie_result(info, download=True)
+        if info is None:
+            return DownloadResult(None, [])
+        result = DownloadResult(info, requested_filepaths(info), ydl.sanitize_info(info, remove_private_keys=True))
+        result.subtitle_tracks = tracks
+
+        if tracks:
+            ydl.params.update(
+                {
+                    'skip_download': True,
+                    'writesubtitles': True,
+                    'writeautomaticsub': True,
+                    'subtitleslangs': subtitles.subtitleslangs_option(tracks),
+                    'subtitlesformat': 'vtt/best',
+                }
+            )
+            try:
+                ydl.process_ie_result(info, download=True)
+            except Exception as e:
+                result.subtitles_error = classify_error(e)['error']
+                ydl_opts['logger'].warning('Subtitles failed, the media is kept: %s', result.subtitles_error)
+        return result
 
 
-def collect_downloaded_files(info: dict | None, download_dir: Path) -> list[str]:
-    """Names of the media files yt-dlp reports as downloaded, including playlist entries (Instagram carousels)"""
+def requested_filepaths(info: dict) -> list[str]:
+    """Paths of the media yt-dlp reports as downloaded, including playlist entries (Instagram carousels)"""
     filepaths = []
 
     def walk(item: dict):
@@ -76,14 +125,17 @@ def collect_downloaded_files(info: dict | None, download_dir: Path) -> list[str]
             if entry:
                 walk(entry)
 
-    if info:
-        walk(info)
+    walk(info)
+    return filepaths
 
+
+def collect_downloaded_files(filepaths: list[str], download_dir: Path) -> list[str]:
+    """Names of the complete, non-empty media files among the paths yt-dlp reported"""
     root = download_dir.resolve()
     names = []
     for filepath in filepaths:
         path = Path(filepath).resolve()
-        if path.parent != root or path.name in (METADATA_FILENAME, LOG_FILENAME):
+        if path.parent != root or path.name in PRIVATE_FILENAMES:
             continue
         if path.name.endswith(INCOMPLETE_SUFFIXES):
             continue
@@ -92,6 +144,18 @@ def collect_downloaded_files(info: dict | None, download_dir: Path) -> list[str]
         if path.name not in names:
             names.append(path.name)
     return names
+
+
+def collect_subtitle_files(tracks: dict[str, bool], download_dir: Path) -> list[tuple[str, str]]:
+    """(file name, track key) of the subtitle files the subtitles pass wrote, also after it failed halfway"""
+    found = []
+    for path in sorted(download_dir.iterdir()):
+        if path.is_symlink() or not path.is_file() or path.stat().st_size == 0:
+            continue
+        key = subtitles.subtitle_track_of(path.name, tracks)
+        if key is not None:
+            found.append((path.name, key))
+    return found
 
 
 def extract_video_metadata(info: dict) -> dict:

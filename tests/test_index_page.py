@@ -57,3 +57,16 @@ def test_job_page_of_unknown_job_says_not_found(page_script):
     result = run_scenario(page_script, 'job-not-found')
 
     assert result['status'] == {'className': 'status error', 'text': 'Error: Download not found.'}
+
+
+def test_completed_job_links_every_artifact(page_script):
+    result = run_scenario(page_script, 'job-completed')
+
+    assert result['status']['className'] == 'status success'
+    assert result['links'] == [
+        f'/downloads/{JOB_ID}/Some_video-abc.mp4',
+        f'/downloads/{JOB_ID}/Some_video-abc.en.vtt',
+        f'/downloads/{JOB_ID}/Some_video-abc.cs-orig.vtt',
+        f'/downloads/{JOB_ID}/info.json',
+    ]
+    assert '<b>video</b>' not in result['html']

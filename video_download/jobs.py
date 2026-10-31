@@ -8,11 +8,24 @@ from pathlib import Path
 
 from video_download import config, storage
 from video_download.errors import classify_error, is_needs_auth
-from video_download.storage import ACTIVE_STATUSES, load_metadata, save_metadata, update_metadata
+from video_download.storage import (
+    ACTIVE_STATUSES,
+    INFO,
+    INFO_FILENAME,
+    MEDIA,
+    SUBTITLE,
+    artifact,
+    load_metadata,
+    save_metadata,
+    update_metadata,
+    write_json,
+)
 from video_download.ytdlp import (
+    DownloadResult,
     build_ydl_opts,
     cleanup_ytdlp_logger,
     collect_downloaded_files,
+    collect_subtitle_files,
     extract_video_metadata,
     is_instagram_extractor,
     is_youtube_extractor,
@@ -38,6 +51,7 @@ def create_job(url: str, download_url: str, extractor: str) -> str:
         'extractor': extractor,
         'status': 'pending',
         'files': [],
+        'artifacts': [],
         'error': None,
         'error_code': None,
         'error_type': None,
@@ -50,7 +64,7 @@ def create_job(url: str, download_url: str, extractor: str) -> str:
 
 async def download_youtube(
     download_id: str, download_dir: Path, download_url: str, ytdlp_logger: logging.Logger
-) -> dict | None:
+) -> DownloadResult:
     """First attempt without cookies, one retry with the YouTube cookies file when YouTube asks for a login"""
     update_metadata(download_dir, used_youtube_cookies=False)
     ydl_opts = build_ydl_opts(download_dir, ytdlp_logger)
@@ -68,6 +82,27 @@ async def download_youtube(
     # A text stream instead of the path, so yt-dlp never writes the cookies back to the file
     retry_opts['cookiefile'] = io.StringIO(cookies_file.read_text(encoding='utf-8'))
     return await asyncio.to_thread(run_ytdlp, retry_opts, download_url)
+
+
+def subtitle_artifacts(download_dir: Path, result: DownloadResult) -> list[dict]:
+    tracks = result.subtitle_tracks or {}
+    return [
+        artifact(download_dir, name, SUBTITLE, lang=key, auto=tracks[key])
+        for name, key in collect_subtitle_files(tracks, download_dir)
+    ]
+
+
+def write_info_file(download_id: str, download_dir: Path, result: DownloadResult) -> bool:
+    """info.json is a convenience next to the media, failing to write it does not fail the job"""
+    if result.clean_info is None:
+        return False
+    try:
+        write_json(download_dir / INFO_FILENAME, result.clean_info)
+        return True
+    except Exception:
+        logger.exception('Download %s: could not write %s', download_id, INFO_FILENAME)
+        (download_dir / INFO_FILENAME).unlink(missing_ok=True)
+        return False
 
 
 def mark_failed(download_dir: Path, download_id: str, error: dict, extractor: str | None = None):
@@ -97,15 +132,31 @@ async def download_video_task(download_id: str, url: str):
 
         ytdlp_logger = setup_ytdlp_logger(download_id, download_dir)
         if is_youtube_extractor(extractor):
-            info = await download_youtube(download_id, download_dir, download_url, ytdlp_logger)
+            result = await download_youtube(download_id, download_dir, download_url, ytdlp_logger)
         else:
             ydl_opts = build_ydl_opts(download_dir, ytdlp_logger, instagram_cookies=is_instagram_extractor(extractor))
-            info = await asyncio.to_thread(run_ytdlp, ydl_opts, download_url)
+            result = await asyncio.to_thread(run_ytdlp, ydl_opts, download_url)
 
-        files = collect_downloaded_files(info, download_dir)
-        video_metadata = extract_video_metadata(info) if info else {}
+        files = collect_downloaded_files(result.media_filepaths, download_dir)
+        video_metadata = extract_video_metadata(result.info) if result.info else {}
         if files:
-            update_metadata(download_dir, status='completed', files=files, **video_metadata)
+            artifacts = [artifact(download_dir, name, MEDIA) for name in files]
+            artifacts += subtitle_artifacts(download_dir, result)
+            if write_info_file(download_id, download_dir, result):
+                artifacts.append(artifact(download_dir, INFO_FILENAME, INFO))
+            if result.subtitles_error:
+                logger.warning(
+                    'Download %s: subtitles failed, the media is kept: %s', download_id, result.subtitles_error
+                )
+            update_metadata(
+                download_dir,
+                status='completed',
+                files=files,
+                artifacts=artifacts,
+                subtitles_error=result.subtitles_error,
+                completed_at=storage.now_iso(),
+                **video_metadata,
+            )
             logger.info('Download %s completed: extractor=%s files=%s', download_id, extractor, files)
         else:
             update_metadata(download_dir, **video_metadata)

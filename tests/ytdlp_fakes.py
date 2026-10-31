@@ -8,14 +8,22 @@ from yt_dlp.utils import DownloadError, ExtractorError
 
 
 class FakeYoutubeDL:
-    """Stands in for yt_dlp.YoutubeDL, `behaviour(opts, url)` returns the info dict or raises"""
+    """Stands in for yt_dlp.YoutubeDL.
+
+    `behaviour(opts, url)` runs at extraction, writes the media files and returns the info dict or raises.
+    `subtitles_behaviour(params, info)` runs in the subtitles pass (skip_download), writes subtitle files or raises.
+    """
 
     behaviour = None
+    subtitles_behaviour = None
     instances = []
 
     def __init__(self, opts):
         self.opts = opts
+        self.params = opts
         self.calls = []
+        # Copies of the params of every process_ie_result call
+        self.processed = []
         FakeYoutubeDL.instances.append(self)
 
     def __enter__(self):
@@ -27,6 +35,16 @@ class FakeYoutubeDL:
     def extract_info(self, url, download=True):
         self.calls.append((url, download))
         return FakeYoutubeDL.behaviour(self.opts, url)
+
+    def process_ie_result(self, info, download=True):
+        self.processed.append(dict(self.params))
+        if self.params.get('skip_download') and FakeYoutubeDL.subtitles_behaviour:
+            FakeYoutubeDL.subtitles_behaviour(self.params, info)
+        return info
+
+    @staticmethod
+    def sanitize_info(info, remove_private_keys=False):
+        return json.loads(json.dumps(info, default=str))
 
 
 def raise_like_ytdlp(exc: Exception):
