@@ -6,7 +6,6 @@ from fastapi.testclient import TestClient
 from yt_dlp.networking.exceptions import TransportError
 from yt_dlp.utils import ExtractorError, PostProcessingError
 
-import main
 from tests.ytdlp_fakes import (
     FakeYoutubeDL,
     extractor_error_caused_by,
@@ -14,6 +13,7 @@ from tests.ytdlp_fakes import (
     read_metadata,
     write_media,
 )
+from video_download import config, errors, storage, urls, web, ytdlp
 
 VIDEO_URL = 'https://www.youtube.com/watch?v=dQw4w9WgXcQ'
 PLAYLIST_REJECTED = 'Playlists and channels are not supported, paste a link to a single video.'
@@ -50,10 +50,10 @@ PLAYLIST_REJECTED = 'Playlists and channels are not supported, paste a link to a
 )
 def test_resolve_download_url(url, expected):
     if expected is None:
-        with pytest.raises(main.InvalidDownloadUrl, match=PLAYLIST_REJECTED):
-            main.resolve_download_url(url)
+        with pytest.raises(urls.InvalidDownloadUrl, match=PLAYLIST_REJECTED):
+            urls.resolve_download_url(url)
     else:
-        assert main.resolve_download_url(url)[0] == expected
+        assert urls.resolve_download_url(url)[0] == expected
 
 
 @pytest.mark.parametrize(
@@ -147,7 +147,7 @@ def test_service_owned_options_win_over_user_config(client, downloads_dir, monke
         'format': 'worst',
         'retries': 3,
     }
-    monkeypatch.setattr(main, 'load_user_config', lambda: ({'somesite': {'skip': ['hls']}}, user_opts))
+    monkeypatch.setattr(config, 'load_user_config', lambda: ({'somesite': {'skip': ['hls']}}, user_opts))
     FakeYoutubeDL.behaviour = lambda opts, url: None
 
     download_id = client.post('/download', data={'url': VIDEO_URL}).json()['download_id']
@@ -155,7 +155,7 @@ def test_service_owned_options_win_over_user_config(client, downloads_dir, monke
     (ydl,) = FakeYoutubeDL.instances
     assert ydl.opts['ignoreerrors'] is False
     assert ydl.opts['noplaylist'] is True
-    assert ydl.opts['outtmpl'] == main.OUTPUT_TEMPLATE
+    assert ydl.opts['outtmpl'] == ytdlp.OUTPUT_TEMPLATE
     assert ydl.opts['paths'] == {'home': str(downloads_dir / download_id)}
     assert ydl.opts['format'] == 'worst'
     assert ydl.opts['retries'] == 3
@@ -258,7 +258,7 @@ def test_failed_download_is_classified(client, downloads_dir, caplog, raiser, er
 
 def test_metadata_keeps_created_at(client, downloads_dir, monkeypatch):
     ticks = iter(f'2026-01-01T00:00:{second:02d}+00:00' for second in range(60))
-    monkeypatch.setattr(main, 'now_iso', lambda: next(ticks))
+    monkeypatch.setattr(storage, 'now_iso', lambda: next(ticks))
     FakeYoutubeDL.behaviour = lambda opts, url: None
 
     download_id = client.post('/download', data={'url': VIDEO_URL}).json()['download_id']
@@ -271,13 +271,13 @@ def test_metadata_keeps_created_at(client, downloads_dir, monkeypatch):
 def test_startup_marks_unfinished_downloads_interrupted(downloads_dir):
     for download_id, status in [('a' * 8, 'pending'), ('b' * 8, 'downloading'), ('c' * 8, 'completed')]:
         (downloads_dir / download_id).mkdir(parents=True)
-        main.save_metadata(
+        storage.save_metadata(
             downloads_dir / download_id,
             {'download_id': download_id, 'status': status, 'url': VIDEO_URL, 'created_at': '2026-01-01T00:00:00+00:00'},
         )
     (downloads_dir / 'stray-file').write_text('x')
 
-    with TestClient(main.app):
+    with TestClient(web.app):
         pass
 
     for download_id in ('a' * 8, 'b' * 8):
@@ -310,20 +310,20 @@ def test_status_of_unknown_or_malformed_id(client):
 
 
 def test_saved_metadata_is_readable_by_others(tmp_path):
-    main.save_metadata(tmp_path, {'status': 'pending'})
+    storage.save_metadata(tmp_path, {'status': 'pending'})
 
     assert (tmp_path / 'metadata.json').stat().st_mode & 0o777 == 0o644
 
 
 def test_save_metadata_is_atomic(tmp_path, monkeypatch):
-    main.save_metadata(tmp_path, {'status': 'pending'})
+    storage.save_metadata(tmp_path, {'status': 'pending'})
 
     def failing_dump(*args, **kwargs):
         raise OSError('disk full')
 
-    monkeypatch.setattr(main.json, 'dump', failing_dump)
+    monkeypatch.setattr(storage.json, 'dump', failing_dump)
     with pytest.raises(OSError):
-        main.save_metadata(tmp_path, {'status': 'completed'})
+        storage.save_metadata(tmp_path, {'status': 'completed'})
 
     assert json.loads((tmp_path / 'metadata.json').read_text()) == {'status': 'pending'}
     assert [p.name for p in tmp_path.iterdir()] == ['metadata.json']
@@ -350,7 +350,7 @@ def test_bot_check_is_needs_auth():
     with pytest.raises(Exception) as exc_info:
         bot_checked()
 
-    assert main.classify_error(exc_info.value)['error_code'] == 'needs_auth'
+    assert errors.classify_error(exc_info.value)['error_code'] == 'needs_auth'
 
 
 def fail_without_cookies_then(retry):

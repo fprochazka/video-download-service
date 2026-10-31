@@ -20,7 +20,7 @@ RUN uv sync --frozen --no-dev
 
 # Copy application files
 COPY main.py ./
-COPY templates/ ./templates/
+COPY video_download/ ./video_download/
 
 # Create downloads directory
 RUN mkdir -p downloads

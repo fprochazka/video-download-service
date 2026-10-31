@@ -39,10 +39,10 @@ This project uses [Ruff](https://github.com/astral-sh/ruff) for code formatting 
 
 ```bash
 # Check and auto-fix linting issues
-uv run ruff check main.py tests --fix
+uv run ruff check main.py video_download tests --fix
 
 # Format code
-uv run ruff format main.py tests
+uv run ruff format main.py video_download tests
 
 # Run the tests (yt-dlp is replaced by a fake, no network access)
 uv run pytest -q
@@ -271,9 +271,17 @@ Some options are owned by the service and always override `YTDLP_OPTS`: `ignoree
 
 ```
 video-download/
-├── main.py              # FastAPI application
-├── templates/
-│   └── index.html       # Frontend HTML template
+├── main.py              # Entrypoint, runs the FastAPI app with uvicorn
+├── video_download/
+│   ├── web.py           # FastAPI app and routes
+│   ├── jobs.py          # Job creation, the background download task, the startup sweep
+│   ├── ytdlp.py         # yt-dlp options and the files and metadata a download produced
+│   ├── errors.py        # Classification of failures into error codes
+│   ├── urls.py          # URL validation and YouTube playlist stripping
+│   ├── storage.py       # metadata.json of each job
+│   ├── config.py        # Downloads directory, cookies files, extractor_config.py
+│   └── templates/
+│       └── index.html   # Frontend HTML template
 ├── tests/               # pytest suite
 ├── downloads/           # Download directories (created automatically)
 │   └── {uuid}/
