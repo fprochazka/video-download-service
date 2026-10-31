@@ -95,6 +95,8 @@ def save_metadata(download_dir: Path, metadata: dict):
             json.dump(metadata, f, indent=2, ensure_ascii=False)
             f.flush()
             os.fsync(f.fileno())
+        # mkstemp creates the file as 0600, keep metadata readable on the host like the other job files
+        os.chmod(tmp_name, 0o644)
         os.replace(tmp_name, download_dir / METADATA_FILENAME)
     except BaseException:
         Path(tmp_name).unlink(missing_ok=True)

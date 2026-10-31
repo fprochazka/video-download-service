@@ -309,6 +309,12 @@ def test_status_of_unknown_or_malformed_id(client):
     assert client.get('/downloads/not-a-uuid/file.mp4').status_code == 422
 
 
+def test_saved_metadata_is_readable_by_others(tmp_path):
+    main.save_metadata(tmp_path, {'status': 'pending'})
+
+    assert (tmp_path / 'metadata.json').stat().st_mode & 0o777 == 0o644
+
+
 def test_save_metadata_is_atomic(tmp_path, monkeypatch):
     main.save_metadata(tmp_path, {'status': 'pending'})
 
