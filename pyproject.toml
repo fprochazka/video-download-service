@@ -5,15 +5,15 @@ description = "Add your description here"
 requires-python = ">=3.12"
 dependencies = [
     "aiofiles>=25.1.0",
-    "fastapi>=0.121.2",
-    "python-multipart>=0.0.20",
-    "uvicorn>=0.38.0",
-    "yt-dlp>=2025.11.12",
+    "fastapi>=0.162.0",
+    "python-multipart>=0.0.32",
+    "uvicorn>=0.54.0",
+    "yt-dlp[default,deno]>=2026.10.26",
 ]
 
 [dependency-groups]
 dev = [
-    "ruff>=0.8.4",
+    "ruff>=0.17.3",
 ]
 
 [tool.ruff]
