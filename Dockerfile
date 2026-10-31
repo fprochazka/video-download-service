@@ -32,4 +32,4 @@ EXPOSE 8000
 ENV PYTHONUNBUFFERED=1
 
 # Run the application using uv
-CMD ["uv", "run", "python", "main.py"]
+CMD ["uv", "run", "--no-sync", "python", "main.py"]
