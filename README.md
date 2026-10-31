@@ -10,13 +10,16 @@ A simple web service for downloading videos from various platforms using yt-dlp 
 - **UUID-based privacy** - Each download gets a unique UUID, files are not publicly listable
 - **Persistent status** - Download ID saved in localStorage, resumes polling on page reload
 - **Metadata tracking** - Comprehensive video metadata saved to JSON for each download
-- **URL-safe filenames** - Automatic sanitization of filenames for web serving
-- **Error handling** - Failed downloads tracked in metadata with error details
+- **URL-safe filenames** - yt-dlp's `restrictfilenames` keeps names ASCII without spaces, the video id keeps them unique
+- **Best quality** - Downloads the best video and audio streams and merges them into mp4 with ffmpeg
+- **Single videos only** - A YouTube link to a video inside a playlist or mix downloads just that video; playlist and channel links are rejected. Other sites are untouched, so Instagram carousels still download all their items
+- **Error handling** - Failed downloads are tracked in metadata with the error message and a machine-readable `error_code`, and logged to the service log
 - **Download status states**:
   - `pending` - Download queued
   - `downloading` - Video being downloaded
-  - `completed` - Ready for download
-  - `failed` - Error occurred (with details in metadata)
+  - `completed` - At least one media file was downloaded
+  - `failed` - Error occurred, or yt-dlp finished without a media file (details in `error`, `error_code`, `error_type`)
+- **Restart safety** - Downloads that were running when the service stopped are marked `failed` with `error_code` `interrupted` on the next start
 
 ## Installation
 
@@ -36,13 +39,18 @@ This project uses [Ruff](https://github.com/astral-sh/ruff) for code formatting 
 
 ```bash
 # Check and auto-fix linting issues
-uv run ruff check main.py --fix
+uv run ruff check main.py tests --fix
 
 # Format code
-uv run ruff format main.py
+uv run ruff format main.py tests
+
+# Run the tests (yt-dlp is replaced by a fake, no network access)
+uv run pytest -q
 ```
 
 This ensures consistent code style and catches common issues.
+
+The downloads directory defaults to `./downloads` and can be changed with the `DOWNLOADS_DIR` environment variable.
 
 ## Running the Application
 
@@ -224,6 +232,8 @@ The configuration file is automatically loaded if present. This allows you to fi
 
 **Note:** `extractor_config.py` is gitignored to keep your customizations private.
 
+Some options are owned by the service and always override `YTDLP_OPTS`: `ignoreerrors` (always off, so failures are reported as failures), `noplaylist`, `restrictfilenames`, `paths`, `outtmpl` and `logger`. The default `format` (`bv*+ba/b`) and `merge_output_format` (`mp4`) can be overridden.
+
 ## Directory Structure
 
 ```
@@ -231,10 +241,12 @@ video-download/
 ├── main.py              # FastAPI application
 ├── templates/
 │   └── index.html       # Frontend HTML template
+├── tests/               # pytest suite
 ├── downloads/           # Download directories (created automatically)
 │   └── {uuid}/
 │       ├── metadata.json    # Download status and video metadata
-│       └── video_file.mp4   # Downloaded video (URL-safe filename)
+│       ├── download.log     # yt-dlp output for this download
+│       └── Video_Title-id.mp4   # Downloaded video (URL-safe filename)
 └── pyproject.toml       # UV project configuration
 ```
 
@@ -246,9 +258,11 @@ video-download/
 - `POST /download` - Initiate download (returns UUID immediately)
   - Accepts: `url` form parameter
   - Returns: `{"download_id": "uuid"}`
+  - Returns HTTP 400 with `{"detail": "..."}` for a non-http(s) URL or a YouTube playlist/channel link, no job is created
 - `GET /status/{download_id}` - Check download status
-  - Returns: Status object with download state, files, metadata, errors
+  - Returns: Status object with download state, files, metadata, errors; 404 for an unknown id, 422 for a malformed one
 - `GET /downloads/{download_id}/{filename}` - Download a specific file
+  - Serves only the media files listed in the job's `files`; `metadata.json` and `download.log` are not public
 
 ### Metadata Structure
 
@@ -258,9 +272,13 @@ Each download creates a `metadata.json` file with:
 {
   "download_id": "uuid",
   "url": "original_url",
+  "download_url": "url_passed_to_yt_dlp",
+  "extractor": "Youtube",
   "status": "completed|downloading|pending|failed",
-  "files": ["filename.mp4"],
+  "files": ["Video_Title-dQw4w9WgXcQ.mp4"],
   "error": null,
+  "error_code": null,
+  "error_type": null,
   "created_at": "2025-01-14T12:00:00",
   "updated_at": "2025-01-14T12:05:00",
   "title": "Video Title",
@@ -275,6 +293,19 @@ Each download creates a `metadata.json` file with:
   "resolution": "1920x1080"
 }
 ```
+
+`download_url` differs from `url` when playlist parameters were stripped from a YouTube link. For a failed download, `error` is yt-dlp's message, `error_type` the class of the root exception, and `error_code` one of:
+
+- `rate_limited` - The site throttles requests (YouTube: "try again later"), retry in about an hour
+- `needs_auth` - Login, age confirmation or a private video, export `cookies.txt` (see above)
+- `unavailable` - Removed, private or otherwise not available
+- `unsupported` - yt-dlp has no extractor for the URL
+- `geo_restricted` - Not available from the server's location
+- `network` - Connection or HTTP failure
+- `postprocessing` - ffmpeg merging or conversion failed
+- `interrupted` - The service restarted while the download was running
+- `invalid_url` - yt-dlp could not interpret the URL
+- `unknown` - Anything else, including a run that produced no media file
 
 ## How It Works
 
