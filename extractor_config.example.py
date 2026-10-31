@@ -12,16 +12,6 @@ EXTRACTOR_ARGS = {
     # 'somesite': {
     #     'skip': ['hls', 'dash'],
     # },
-
-    # Example: Force specific player client
-    # 'somesite': {
-    #     'player_client': ['android', 'web'],
-    # },
-
-    # Example: Use specific API
-    # 'somesite': {
-    #     'api': ['graphql'],
-    # },
 }
 
 # Additional yt-dlp options can be configured here

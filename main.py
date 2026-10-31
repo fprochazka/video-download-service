@@ -121,13 +121,7 @@ async def download_video_task(download_id: str, url: str):
             # Log progress to file instead of stdout
             'progress_hooks': [],  # We'll handle progress differently
             'logger': logging.getLogger(f'yt-dlp.{download_id}'),
-            # Default extractor args
-            'extractor_args': {
-                'youtube': {'player_client': ['android', 'web']},
-                'instagram': {
-                    'api': ['graphql'],  # Use GraphQL API for better compatibility
-                },
-            },
+            'extractor_args': {},
         }
 
         # Configure file handler for yt-dlp logs
