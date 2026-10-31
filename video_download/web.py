@@ -5,11 +5,12 @@ import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import BackgroundTasks, FastAPI, Form, HTTPException
+from fastapi import BackgroundTasks, Depends, FastAPI, Form, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse
 from pydantic import BaseModel
 
 from video_download import config
+from video_download.csrf import page_token, require_csrf, set_token_cookie
 from video_download.jobs import create_job, download_video_task, fail_interrupted_downloads
 from video_download.storage import job_artifacts, load_metadata, media_files
 from video_download.urls import InvalidDownloadUrl, resolve_download_url
@@ -74,24 +75,31 @@ async def lifespan(_app: FastAPI):
 app = FastAPI(title='Video Download Service', lifespan=lifespan)
 
 
-def index_page() -> HTMLResponse:
+def index_page(request: Request) -> HTMLResponse:
     with open(TEMPLATES_DIR / 'index.html', encoding='utf-8') as f:
-        return HTMLResponse(content=f.read())
+        template = f.read()
+    token = page_token(request)
+    # The token is URL-safe base64, safe inside the HTML attribute as it is
+    response = HTMLResponse(content=template.replace('{{ csrf_token }}', token))
+    # A cached page would carry a token that no longer matches the cookie
+    response.headers['Cache-Control'] = 'no-store'
+    set_token_cookie(request, response, token)
+    return response
 
 
 @app.get('/', response_class=HTMLResponse)
-async def index():
+async def index(request: Request):
     """Serve the main page with download form"""
-    return index_page()
+    return index_page(request)
 
 
 @app.get('/jobs/{download_id}', response_class=HTMLResponse)
-async def job_page(download_id: uuid.UUID):
+async def job_page(request: Request, download_id: uuid.UUID):
     """Serve the page for one job; the page reads the id from the path and polls /status, which 404s an unknown id"""
-    return index_page()
+    return index_page(request)
 
 
-@app.post('/download')
+@app.post('/download', dependencies=[Depends(require_csrf)])
 async def download_video(background_tasks: BackgroundTasks, url: str = Form(...)):
     """Initiate video download and return UUID immediately"""
     url = url.strip()

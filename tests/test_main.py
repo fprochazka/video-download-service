@@ -680,3 +680,72 @@ def test_legacy_job_lists_its_media_as_artifacts(client, downloads_dir):
         {'name': 'Old_Video-abc.mp4', 'kind': 'media', 'size': 9, 'lang': None, 'auto': None}
     ]
     assert status['completed_at'] is None
+
+
+def test_page_sets_the_csrf_cookie_and_embeds_the_same_token(downloads_dir):
+    with TestClient(web.app) as fresh:
+        response = fresh.get('/')
+        again = fresh.get(f'/jobs/{LEGACY_JOB_ID}')
+
+    token = response.cookies['csrf_token']
+    assert f'content="{token}"' in response.text
+    assert f'content="{token}"' in again.text
+    cookie = response.headers['set-cookie'].lower()
+    assert 'httponly' in cookie
+    assert 'samesite=strict' in cookie
+    assert 'secure' not in cookie
+    assert response.headers['cache-control'] == 'no-store'
+
+
+def test_csrf_cookie_is_secure_behind_the_https_proxy(downloads_dir):
+    with TestClient(web.app) as fresh:
+        response = fresh.get('/', headers={'X-Forwarded-Proto': 'https'})
+
+    assert '; secure' in response.headers['set-cookie'].lower()
+
+
+@pytest.mark.parametrize(
+    'headers',
+    [
+        {'X-CSRF-Token': None},
+        {'X-CSRF-Token': 'A' * 43},
+        {'Sec-Fetch-Site': 'cross-site'},
+        {'Sec-Fetch-Site': 'same-site'},
+        {'Origin': 'https://evil.example'},
+        {'Origin': 'null'},
+    ],
+)
+def test_download_without_valid_csrf_is_forbidden(client, downloads_dir, headers):
+    for name, value in headers.items():
+        if value is None:
+            client.headers.pop(name)
+        else:
+            client.headers[name] = value
+
+    response = client.post('/download', data={'url': VIDEO_URL})
+
+    assert response.status_code == 403
+    assert isinstance(response.json()['detail'], str)
+    assert list(downloads_dir.iterdir()) == []
+
+
+def test_download_without_csrf_cookie_is_forbidden(client, downloads_dir):
+    client.cookies.clear()
+
+    assert client.post('/download', data={'url': VIDEO_URL}).status_code == 403
+
+
+@pytest.mark.parametrize(
+    'headers',
+    [
+        {'Sec-Fetch-Site': 'same-origin', 'Origin': 'http://testserver'},
+        {'Sec-Fetch-Site': 'none'},
+        {'Origin': 'https://video-download.example.ts.net', 'X-Forwarded-Host': 'video-download.example.ts.net'},
+    ],
+)
+def test_download_from_the_page_passes_csrf(client, headers):
+    FakeYoutubeDL.behaviour = lambda opts, url: None
+
+    response = client.post('/download', data={'url': VIDEO_URL}, headers=headers)
+
+    assert response.status_code == 200

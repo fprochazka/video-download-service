@@ -17,6 +17,7 @@ pytestmark = pytest.mark.skipif(shutil.which('node') is None, reason='node is no
 @pytest.fixture(scope='module')
 def page_script(tmp_path_factory) -> Path:
     html = (web.TEMPLATES_DIR / 'index.html').read_text(encoding='utf-8')
+    assert '{{ csrf_token }}' in html
     (script,) = re.findall(r'<script>(.*?)</script>', html, re.DOTALL)
     path = tmp_path_factory.mktemp('index_page') / 'index.js'
     path.write_text(script, encoding='utf-8')
@@ -38,7 +39,12 @@ def test_submit_opens_the_job_page(page_script):
     result = run_scenario(page_script, 'submit')
 
     assert result['fetches'] == [
-        {'url': '/download', 'method': 'POST', 'body': [['url', 'https://www.youtube.com/watch?v=dQw4w9WgXcQ']]}
+        {
+            'url': '/download',
+            'method': 'POST',
+            'body': [['url', 'https://www.youtube.com/watch?v=dQw4w9WgXcQ']],
+            'csrf': 'page-token',
+        }
     ]
     assert result['assigned'] == [f'/jobs/{JOB_ID}']
 
@@ -46,7 +52,7 @@ def test_submit_opens_the_job_page(page_script):
 def test_job_page_polls_the_status_of_the_job_in_the_path(page_script):
     result = run_scenario(page_script, 'job-page')
 
-    assert result['fetches'] == [{'url': f'/status/{JOB_ID}', 'method': 'GET', 'body': None}]
+    assert result['fetches'] == [{'url': f'/status/{JOB_ID}', 'method': 'GET', 'body': None, 'csrf': None}]
     assert result['intervals'] == 1
     assert result['status']['className'] == 'status loading'
     assert 'Some video' in result['status']['text']

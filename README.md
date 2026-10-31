@@ -310,12 +310,17 @@ video-download/
   - Accepts any UUID version; 422 for a malformed ID, an unknown ID gets the page with "Download not found"
 - `POST /download` - Initiate download (returns UUID immediately)
   - Accepts: `url` form parameter
+  - Requires the CSRF token, see below
   - Returns: `{"download_id": "uuid"}`
   - Returns HTTP 400 with `{"detail": "..."}` for a non-http(s) URL or a YouTube playlist/channel link, no job is created
 - `GET /status/{download_id}` - Check download status
   - Returns: Status object with download state, files, metadata, errors; 404 for an unknown id, 422 for a malformed one
 - `GET /downloads/{download_id}/{filename}` - Download a specific file
   - Serves only the files listed in the job's `artifacts`; `metadata.json` and `download.log` are not public
+
+### CSRF protection
+
+Requests that change state need the `X-CSRF-Token` header with the token the page embeds in its `csrf-token` meta tag. The page response also sets that token in the `csrf_token` cookie (HttpOnly, SameSite=Strict, Secure over https), and the server compares the two. Requests with a `Sec-Fetch-Site` other than `same-origin` or `none`, or an `Origin` that differs from the `Host`, are rejected as well. A rejected request gets HTTP 403 with `{"detail": "..."}`. To call the API from a script, first `GET /`, then send the cookie and the token from the page.
 
 ### Metadata Structure
 

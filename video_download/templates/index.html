@@ -3,6 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta id="csrfToken" name="csrf-token" content="{{ csrf_token }}">
     <title>Video Download Service</title>
     <style>
         body {
@@ -266,6 +267,9 @@
 
         let pollInterval = null;
 
+        // Sent with every POST and DELETE, the server compares it with the csrf_token cookie
+        const csrfToken = document.getElementById('csrfToken').content;
+
         const ERROR_HINTS = {
             needs_auth: 'The site requires a logged-in session. Export your browser cookies to instagram_cookies.txt next to the app (see README), then try again.',
             rate_limited: 'The site is rate-limiting this server. Try again in an hour.',
@@ -504,6 +508,7 @@
 
                 const response = await fetch('/download', {
                     method: 'POST',
+                    headers: { 'X-CSRF-Token': csrfToken },
                     body: formData
                 });
 

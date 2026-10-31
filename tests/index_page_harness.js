@@ -7,7 +7,7 @@ const source = fs.readFileSync(scriptPath, 'utf8');
 
 const listeners = {};
 const element = (id) => ({
-    id, className: '', innerHTML: '', disabled: false, value: '', style: {},
+    id, className: '', innerHTML: '', disabled: false, value: '', style: {}, content: id === 'csrfToken' ? 'page-token' : '',
     addEventListener(type, handler) { listeners[`${id}:${type}`] = handler; },
 });
 const elements = {};
@@ -23,7 +23,10 @@ global.window = {
 };
 global.FormData = class { constructor() { this.entries = []; } append(k, v) { this.entries.push([k, v]); } };
 global.fetch = async (url, options = {}) => {
-    result.fetches.push({ url, method: options.method || 'GET', body: options.body ? options.body.entries : null });
+    result.fetches.push({
+        url, method: options.method || 'GET', body: options.body ? options.body.entries : null,
+        csrf: (options.headers || {})['X-CSRF-Token'] || null,
+    });
     return fetchResponse;
 };
 global.setInterval = () => ++result.intervals;
