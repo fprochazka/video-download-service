@@ -185,13 +185,13 @@ ERROR: [Instagram]: This content may be inappropriate: It's unavailable for cert
 
 1. **Export cookies from your browser:**
    - Install a browser extension like "Get cookies.txt LOCALLY" (Chrome/Firefox)
-   - Log into Instagram (or the platform) in your browser
+   - Log into Instagram in your browser
    - Use the extension to export cookies in Netscape format
    - Save the file as `instagram_cookies.txt`
 
 2. **Add cookies to the application:**
    - Place `instagram_cookies.txt` in the project root directory
-   - The application uses it for every site except YouTube, see [YouTube login](#youtube-login-optional-not-enabled-by-default)
+   - The application sends it only to Instagram jobs, other sites get no cookies; for YouTube see [YouTube login](#youtube-login-optional-not-enabled-by-default)
    - For Docker: mount it as a volume in `docker-compose.yml`:
      ```yaml
      volumes:

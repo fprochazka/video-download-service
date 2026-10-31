@@ -274,13 +274,17 @@ def is_youtube_extractor(extractor: str | None) -> bool:
     return bool(extractor) and extractor.startswith('Youtube')
 
 
+def is_instagram_extractor(extractor: str | None) -> bool:
+    return bool(extractor) and extractor.startswith('Instagram')
+
+
 def youtube_cookies_file() -> Path | None:
     """The YouTube cookies file, if there is one (a Docker bind mount of a missing file creates a directory)"""
     path = Path(os.environ.get(YOUTUBE_COOKIES_FILE_ENV) or YOUTUBE_COOKIES_FILE_DEFAULT)
     return path if path.is_file() else None
 
 
-def build_ydl_opts(download_dir: Path, ytdlp_logger: logging.Logger, general_cookies: bool = True) -> dict:
+def build_ydl_opts(download_dir: Path, ytdlp_logger: logging.Logger, instagram_cookies: bool = False) -> dict:
     extractor_args, user_opts = load_user_config()
 
     ydl_opts = {
@@ -308,9 +312,9 @@ def build_ydl_opts(download_dir: Path, ytdlp_logger: logging.Logger, general_coo
         }
     )
 
-    # Add cookies if available (helps with age-restricted Instagram content), never sent to YouTube
+    # Instagram session cookies (helps with age-restricted content), only for Instagram jobs, other sites get no cookies
     cookies_file = Path('instagram_cookies.txt')
-    if general_cookies and cookies_file.exists():
+    if instagram_cookies and cookies_file.is_file():
         ydl_opts['cookiefile'] = str(cookies_file)
 
     return ydl_opts
@@ -404,7 +408,7 @@ async def download_youtube(
 ) -> dict | None:
     """First attempt without cookies, one retry with the YouTube cookies file when YouTube asks for a login"""
     update_metadata(download_dir, used_youtube_cookies=False)
-    ydl_opts = build_ydl_opts(download_dir, ytdlp_logger, general_cookies=False)
+    ydl_opts = build_ydl_opts(download_dir, ytdlp_logger)
     try:
         return await asyncio.to_thread(run_ytdlp, ydl_opts, download_url)
     except Exception as e:
@@ -415,7 +419,7 @@ async def download_youtube(
     logger.info('Download %s needs a YouTube login, retrying with YouTube cookies from %s', download_id, cookies_file)
     ytdlp_logger.info('YouTube asked for a login, retrying with YouTube cookies from %s', cookies_file)
     update_metadata(download_dir, used_youtube_cookies=True)
-    retry_opts = build_ydl_opts(download_dir, ytdlp_logger, general_cookies=False)
+    retry_opts = build_ydl_opts(download_dir, ytdlp_logger)
     # A text stream instead of the path, so yt-dlp never writes the cookies back to the file
     retry_opts['cookiefile'] = io.StringIO(cookies_file.read_text(encoding='utf-8'))
     return await asyncio.to_thread(run_ytdlp, retry_opts, download_url)
@@ -450,7 +454,7 @@ async def download_video_task(download_id: str, url: str):
         if is_youtube_extractor(extractor):
             info = await download_youtube(download_id, download_dir, download_url, ytdlp_logger)
         else:
-            ydl_opts = build_ydl_opts(download_dir, ytdlp_logger)
+            ydl_opts = build_ydl_opts(download_dir, ytdlp_logger, instagram_cookies=is_instagram_extractor(extractor))
             info = await asyncio.to_thread(run_ytdlp, ydl_opts, download_url)
 
         files = collect_downloaded_files(info, download_dir)

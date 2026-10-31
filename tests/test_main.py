@@ -360,13 +360,13 @@ def fail_without_cookies_then(retry):
 
 
 @pytest.fixture
-def general_cookies(downloads_dir):
+def instagram_cookies(downloads_dir):
     path = downloads_dir.parent / 'instagram_cookies.txt'
     path.write_text('# Netscape HTTP Cookie File\n')
     return path
 
 
-def test_youtube_without_cookies_file_fails_with_needs_auth(client, downloads_dir, general_cookies):
+def test_youtube_without_cookies_file_fails_with_needs_auth(client, downloads_dir, instagram_cookies):
     FakeYoutubeDL.behaviour = fail_without_cookies_then(lambda opts: pytest.fail('must not retry'))
 
     download_id = client.post('/download', data={'url': VIDEO_URL}).json()['download_id']
@@ -389,7 +389,7 @@ def test_youtube_cookies_directory_is_treated_as_absent(client, downloads_dir):
     assert len(FakeYoutubeDL.instances) == 1
 
 
-def test_youtube_needs_auth_is_retried_with_youtube_cookies(client, downloads_dir, general_cookies, caplog):
+def test_youtube_needs_auth_is_retried_with_youtube_cookies(client, downloads_dir, instagram_cookies, caplog):
     cookies_file = downloads_dir.parent / 'youtube_cookies.txt'
     cookies_file.write_text(YOUTUBE_COOKIES)
 
@@ -461,7 +461,7 @@ def test_youtube_rate_limit_is_not_retried_with_cookies(client, downloads_dir):
     assert len(FakeYoutubeDL.instances) == 1
 
 
-def test_instagram_uses_general_cookies_without_retry(client, downloads_dir, general_cookies):
+def test_instagram_uses_instagram_cookies_without_retry(client, downloads_dir, instagram_cookies):
     (downloads_dir.parent / 'youtube_cookies.txt').write_text(YOUTUBE_COOKIES)
 
     def behaviour(opts, url):
@@ -476,3 +476,13 @@ def test_instagram_uses_general_cookies_without_retry(client, downloads_dir, gen
     assert 'used_youtube_cookies' not in metadata
     (ydl,) = FakeYoutubeDL.instances
     assert ydl.opts['cookiefile'] == 'instagram_cookies.txt'
+
+
+def test_other_sites_get_no_cookies(client, downloads_dir, instagram_cookies):
+    FakeYoutubeDL.behaviour = lambda opts, url: {'requested_downloads': [{'filepath': write_media(opts, 'clip.mp4')}]}
+
+    download_id = client.post('/download', data={'url': 'https://vimeo.com/123456789'}).json()['download_id']
+
+    assert read_metadata(downloads_dir, download_id)['status'] == 'completed'
+    (ydl,) = FakeYoutubeDL.instances
+    assert 'cookiefile' not in ydl.opts
