@@ -95,28 +95,35 @@ def write_json(path: Path, data: dict):
 def remove_artifacts(download_dir: Path, names: set[str], reason: str) -> dict:
     """Delete these artifacts of a job from disk and metadata, and record them in deleted_files.
 
-    Takes artifacts_lock and reloads the metadata under it. Names that are not artifacts of the job are ignored;
-    private files are never artifacts. Returns the updated metadata.
+    Names that are not artifacts of the job are ignored; private files are never artifacts. Returns the updated
+    metadata.
     """
     with artifacts_lock:
         metadata = load_metadata(download_dir) or {}
-        artifacts = job_artifacts(download_dir, metadata)
-        removed = [a for a in artifacts if a['name'] in names]
-        if not removed:
-            return metadata
-        deleted_at = now_iso()
-        for entry in removed:
-            path = download_dir / entry['name']
-            if path.is_file() and not path.is_symlink():
-                path.unlink()
-        removed_names = {a['name'] for a in removed}
-        deleted = [
-            {'name': a['name'], 'kind': a['kind'], 'size': a.get('size'), 'deleted_at': deleted_at, 'reason': reason}
-            for a in removed
-        ]
-        return update_metadata(
-            download_dir,
-            files=[name for name in media_files(metadata) if name not in removed_names],
-            artifacts=[a for a in artifacts if a['name'] not in removed_names],
-            deleted_files=(metadata.get('deleted_files') or []) + deleted,
-        )
+        removed = [a for a in job_artifacts(download_dir, metadata) if a['name'] in names]
+        return delete_job_files(download_dir, metadata, removed, reason)
+
+
+def delete_job_files(download_dir: Path, metadata: dict, entries: list[dict], reason: str) -> dict:
+    """Unlink the files ({name, kind, size}) of a job, drop them from files and artifacts, record them in deleted_files.
+
+    The caller holds artifacts_lock and passes the metadata it loaded under it. Symlinks are never followed.
+    """
+    if not entries:
+        return metadata
+    deleted_at = now_iso()
+    for entry in entries:
+        path = download_dir / entry['name']
+        if path.is_file() and not path.is_symlink():
+            path.unlink()
+    names = {entry['name'] for entry in entries}
+    deleted = [
+        {'name': e['name'], 'kind': e['kind'], 'size': e.get('size'), 'deleted_at': deleted_at, 'reason': reason}
+        for e in entries
+    ]
+    return update_metadata(
+        download_dir,
+        files=[name for name in media_files(metadata) if name not in names],
+        artifacts=[a for a in job_artifacts(download_dir, metadata) if a['name'] not in names],
+        deleted_files=(metadata.get('deleted_files') or []) + deleted,
+    )

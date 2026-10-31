@@ -1,6 +1,8 @@
 """Paths and optional files the service reads from its working directory"""
 
 import os
+from dataclasses import dataclass
+from datetime import timedelta
 from pathlib import Path
 
 DOWNLOADS_DIR = Path(os.environ.get('DOWNLOADS_DIR', 'downloads'))
@@ -26,3 +28,32 @@ def load_user_config() -> tuple[dict, dict]:
     except ImportError:
         return {}, {}
     return EXTRACTOR_ARGS, YTDLP_OPTS
+
+
+@dataclass(frozen=True)
+class GcSettings:
+    enabled: bool
+    dry_run: bool
+    max_age: timedelta
+    min_size_bytes: int
+    interval_seconds: float
+    # Leftover partial downloads of a failed job are useless, they go regardless of size after this
+    failed_partials_age: timedelta = timedelta(days=1)
+
+
+def env_bool(name: str, default: bool) -> bool:
+    value = os.environ.get(name)
+    if value is None or not value.strip():
+        return default
+    return value.strip().lower() in ('1', 'true', 'yes', 'on')
+
+
+def gc_settings() -> GcSettings:
+    """Garbage collection of large old media, see README"""
+    return GcSettings(
+        enabled=env_bool('GC_ENABLED', True),
+        dry_run=env_bool('GC_DRY_RUN', False),
+        max_age=timedelta(days=float(os.environ.get('GC_MAX_AGE_DAYS') or 90)),
+        min_size_bytes=int(float(os.environ.get('GC_MIN_SIZE_MB') or 5) * 1024 * 1024),
+        interval_seconds=float(os.environ.get('GC_INTERVAL_HOURS') or 6) * 3600,
+    )

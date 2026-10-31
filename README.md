@@ -21,6 +21,7 @@ A simple web service for downloading videos from various platforms using yt-dlp 
   - `downloading` - Video being downloaded
   - `completed` - At least one media file was downloaded
   - `failed` - Error occurred, or yt-dlp finished without a media file (details in `error`, `error_code`, `error_type`)
+- **Cleanup of old media** - Media files over 5 MB are deleted 90 days after their job finished, the job page and its subtitles and details stay, see [Garbage collection](#garbage-collection)
 - **Restart safety** - Downloads that were running when the service stopped are marked `failed` with `error_code` `interrupted` on the next start
 
 ## Installation
@@ -275,6 +276,28 @@ The configuration file is automatically loaded if present. This allows you to fi
 
 Some options are owned by the service and always override `YTDLP_OPTS`: `ignoreerrors` (always off, so failures are reported as failures), `noplaylist`, `restrictfilenames`, `paths`, `outtmpl` and `logger`. The default `format` (`bv*+ba/b`) and `merge_output_format` (`mp4`) can be overridden.
 
+### Garbage collection
+
+The service deletes large media of old jobs, so the downloads directory does not grow forever. It runs once in the background a moment after startup, then every `GC_INTERVAL_HOURS`.
+
+- A media file larger than `GC_MIN_SIZE_MB` is deleted once its job finished more than `GC_MAX_AGE_DAYS` ago. Leftover partial downloads (`*.part`, `*.ytdl`) of such a job go by the same rule.
+- Partial downloads of a `failed` job are deleted once the job is older than one day, whatever their size.
+- The job's age comes from `completed_at`. Jobs created before that field existed use `updated_at`, then `created_at`. File modification times are never used, yt-dlp can set them from the server's `Last-Modified` header.
+- `metadata.json`, `download.log`, subtitles and `info.json` are never deleted, so the job page keeps working. Each deleted file is listed in the job's `deleted_files` with `reason` `gc`.
+- Jobs that are `pending` or `downloading` are skipped.
+
+Each deleted file gets one INFO line in the service log, and each run ends with a summary line of the file count and the megabytes freed.
+
+Set these environment variables to change the defaults:
+
+- `GC_ENABLED` - `true`; `false` turns the cleanup off
+- `GC_DRY_RUN` - `false`; `true` only logs what a run would delete
+- `GC_MAX_AGE_DAYS` - `90`
+- `GC_MIN_SIZE_MB` - `5`
+- `GC_INTERVAL_HOURS` - `6`
+
+**Note:** On an existing deployment, the first run deletes every file that already matches the rules, which is every media file over 5 MB of every job that finished more than 90 days ago. To see the list first, start once with `GC_DRY_RUN=true` and read the service log.
+
 ## Directory Structure
 
 ```
@@ -285,6 +308,8 @@ video-download/
 │   ├── jobs.py          # Job creation, the background download task, the startup sweep
 │   ├── ytdlp.py         # yt-dlp options and the files and metadata a download produced
 │   ├── subtitles.py     # Which subtitle tracks a job downloads
+│   ├── cleanup.py       # Garbage collection of large old media
+│   ├── csrf.py          # CSRF protection of the state-changing routes
 │   ├── errors.py        # Classification of failures into error codes
 │   ├── urls.py          # URL validation and YouTube playlist stripping
 │   ├── storage.py       # metadata.json of each job
@@ -366,7 +391,7 @@ Each download creates a `metadata.json` file with:
 }
 ```
 
-`files` lists only the media; `artifacts` lists every downloadable file of the job with its `kind` (`media`, `subtitle`, `info`). For a subtitle, `lang` is yt-dlp's track key (`en`, `en-GB`, `cs-orig`) and `auto` is `true` for automatic captions. `deleted_files` keeps a record of every file removed from `artifacts`; `reason` is `user` for the delete button. Jobs created before artifacts existed have no `artifacts` and no `completed_at`; `/status` lists their media files as artifacts.
+`files` lists only the media; `artifacts` lists every downloadable file of the job with its `kind` (`media`, `subtitle`, `info`). For a subtitle, `lang` is yt-dlp's track key (`en`, `en-GB`, `cs-orig`) and `auto` is `true` for automatic captions. `deleted_files` keeps a record of every file removed from `artifacts`; `reason` is `user` for the delete button and `gc` for the [garbage collection](#garbage-collection), which also records leftover partial downloads with `kind` `partial`. Jobs created before artifacts existed have no `artifacts` and no `completed_at`; `/status` lists their media files as artifacts.
 
 YouTube jobs also carry `used_youtube_cookies` (`true` when the retry with `youtube_cookies.txt` ran).
 

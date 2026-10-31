@@ -1,5 +1,7 @@
 """The FastAPI app: the web page, job submission, status and file download routes"""
 
+import asyncio
+import contextlib
 import logging
 import uuid
 from contextlib import asynccontextmanager
@@ -9,7 +11,7 @@ from fastapi import BackgroundTasks, Depends, FastAPI, Form, HTTPException, Requ
 from fastapi.responses import FileResponse, HTMLResponse
 from pydantic import BaseModel
 
-from video_download import config
+from video_download import cleanup, config
 from video_download.csrf import page_token, require_csrf, set_token_cookie
 from video_download.jobs import create_job, download_video_task, fail_interrupted_downloads
 from video_download.storage import ACTIVE_STATUSES, job_artifacts, load_metadata, media_files, remove_artifacts
@@ -80,7 +82,18 @@ class DownloadStatus(BaseModel):
 async def lifespan(_app: FastAPI):
     config.DOWNLOADS_DIR.mkdir(parents=True, exist_ok=True)
     fail_interrupted_downloads(config.DOWNLOADS_DIR)
+
+    gc_settings = config.gc_settings()
+    gc_task = None
+    if gc_settings.enabled:
+        gc_task = asyncio.create_task(cleanup.run_periodically(config.DOWNLOADS_DIR, gc_settings))
+    else:
+        logger.info('GC is disabled')
     yield
+    if gc_task is not None:
+        gc_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await gc_task
 
 
 app = FastAPI(title='Video Download Service', lifespan=lifespan)
