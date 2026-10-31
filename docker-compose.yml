@@ -13,6 +13,10 @@ services:
       - ./instagram_cookies.txt:/app/instagram_cookies.txt
       - ./extractor_config.py:/app/extractor_config.py:ro
     restart: unless-stopped
+    # GEMINI_API_KEY and the other settings, see app.env.example; the app runs without it, transcription is then off
+    env_file:
+      - path: app.env
+        required: false
     environment:
       - PYTHONUNBUFFERED=1
 

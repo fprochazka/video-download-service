@@ -14,6 +14,9 @@ def downloads_dir(tmp_path, monkeypatch):
     monkeypatch.setattr(config, 'DOWNLOADS_DIR', directory)
     monkeypatch.setattr(config, 'load_user_config', lambda: ({}, {}))
     monkeypatch.setattr(yt_dlp, 'YoutubeDL', FakeYoutubeDL)
+    # A key in the developer's environment must never reach a test, transcription tests set a fake one
+    monkeypatch.delenv('GEMINI_API_KEY', raising=False)
+    monkeypatch.delenv('TRANSCRIPTION_MODEL', raising=False)
     FakeYoutubeDL.behaviour = None
     FakeYoutubeDL.subtitles_behaviour = None
     FakeYoutubeDL.instances = []

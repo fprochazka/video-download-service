@@ -14,6 +14,7 @@ from collections.abc import Awaitable, Callable
 logger = logging.getLogger(__name__)
 
 DOWNLOAD = 'download'
+TRANSCRIPTION = 'transcription'
 
 type Job = Callable[..., Awaitable[object]]
 

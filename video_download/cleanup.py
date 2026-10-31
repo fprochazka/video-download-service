@@ -1,4 +1,4 @@
-"""Garbage collection of large media of old jobs; the job, its metadata, log, subtitles and details stay"""
+"""Garbage collection of large media of old jobs; the job, its metadata, log, subtitles, details and transcripts stay"""
 
 import asyncio
 import logging
@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
+from video_download import transcription
 from video_download.config import GcSettings
 from video_download.storage import (
     ACTIVE_STATUSES,
@@ -100,7 +101,8 @@ def collect_garbage(downloads_dir: Path, now: datetime, settings: GcSettings) ->
         try:
             with artifacts_lock:
                 metadata = load_metadata(download_dir)
-                if not metadata or metadata.get('status') in ACTIVE_STATUSES:
+                # A running transcription reads the media, the next pass gets it
+                if not metadata or metadata.get('status') in ACTIVE_STATUSES or transcription.is_active(metadata):
                     continue
                 garbage = garbage_of_job(download_dir, metadata, now, settings)
                 if not garbage:

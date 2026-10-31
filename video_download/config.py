@@ -1,7 +1,7 @@
 """Paths and optional files the service reads from its working directory"""
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import timedelta
 from pathlib import Path
 
@@ -38,6 +38,33 @@ def env_int(name: str, default: int) -> int:
 def download_concurrency() -> int:
     """How many downloads run at the same time, the rest wait in the worker's queue"""
     return env_int('DOWNLOAD_CONCURRENCY', 2)
+
+
+def transcription_concurrency() -> int:
+    """How many transcriptions run at the same time, each one is a request to Gemini"""
+    return env_int('TRANSCRIPTION_CONCURRENCY', 2)
+
+
+DEFAULT_TRANSCRIPTION_MODEL = 'gemini-3.5-flash-lite'
+
+
+@dataclass(frozen=True)
+class TranscriptionSettings:
+    # repr=False keeps the key out of any log line or traceback that prints the settings
+    api_key: str | None = field(repr=False)
+    model: str
+
+    @property
+    def available(self) -> bool:
+        return bool(self.api_key)
+
+
+def transcription_settings() -> TranscriptionSettings:
+    """Transcription with Gemini, see README; without GEMINI_API_KEY transcription is off"""
+    return TranscriptionSettings(
+        api_key=(os.environ.get('GEMINI_API_KEY') or '').strip() or None,
+        model=(os.environ.get('TRANSCRIPTION_MODEL') or '').strip() or DEFAULT_TRANSCRIPTION_MODEL,
+    )
 
 
 @dataclass(frozen=True)

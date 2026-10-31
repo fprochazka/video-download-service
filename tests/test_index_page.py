@@ -79,8 +79,8 @@ def test_completed_job_lists_files_grouped_with_download_and_delete(page_script)
         f'/downloads/{JOB_ID}/info.json',
     ]
     assert result['rows'] == [
-        '|Some_video-abc.mp4||50.0 MB||[Download][Delete Some_video-abc.mp4]|',
-        f'|{evil}||3 B||[Download][Delete {evil}]|',
+        '|Some_video-abc.mp4||50.0 MB||[Download][Transcribe][Delete Some_video-abc.mp4]|',
+        f'|{evil}||3 B||[Download][Transcribe][Delete {evil}]|',
         '|Some_video-abc.en.vtt||en · 40.0 KB||[Download][Delete Some_video-abc.en.vtt]|',
         '|Some_video-abc.cs-orig.vtt||cs-orig, auto · 38.1 KB||[Download][Delete Some_video-abc.cs-orig.vtt]|',
         '|info.json||341.8 KB||[Download][Delete info.json]|',
@@ -120,3 +120,102 @@ def test_refused_delete_tells_the_user(page_script):
 
     assert result['alerts'] == ['The download is still running.']
     assert len(result['rows']) == 5
+
+
+UNAVAILABLE = 'Transcription is not configured on the server (GEMINI_API_KEY, see README)'
+EVIL = '&quot;&gt;&lt;img src=x onerror=alert(1)&gt;.mp4'
+
+
+def transcribe_buttons(result):
+    return [b for b in result['buttons'] if b['text'].startswith('Transcrib')]
+
+
+def test_transcribe_is_disabled_when_the_server_cannot_transcribe(page_script):
+    result = run_scenario(page_script, 'job-completed')
+
+    assert transcribe_buttons(result) == [
+        {'text': 'Transcribe', 'disabled': True, 'title': UNAVAILABLE, 'transcribe': None},
+        {'text': 'Transcribe', 'disabled': True, 'title': UNAVAILABLE, 'transcribe': None},
+    ]
+
+
+def test_running_transcription_shows_its_state_and_keeps_polling(page_script):
+    result = run_scenario(page_script, 'transcription-running')
+
+    assert result['status']['className'] == 'status success'
+    assert transcribe_buttons(result) == [
+        {'text': 'Transcribing...', 'disabled': True, 'title': None, 'transcribe': 'Some_video-abc.mp4'},
+        {'text': 'Transcribing...', 'disabled': True, 'title': None, 'transcribe': EVIL},
+    ]
+    assert result['transcriptions'] == [
+        '||Transcribing with Gemini, this takes a few minutes...',
+        '||Transcription queued...',
+    ]
+    assert (result['intervals'], result['clears']) == (1, 0)
+
+
+def test_failed_transcription_shows_the_error_escaped_with_a_hint(page_script):
+    result = run_scenario(page_script, 'transcription-failed')
+
+    (state,) = result['transcriptions']
+    assert state == (
+        'Transcription failed: Gemini API error 429 &lt;RESOURCE_EXHAUSTED&gt;|'
+        '|Gemini is rate-limiting the API key, try again in a minute.|'
+    )
+    assert transcribe_buttons(result)[0] == {
+        'text': 'Transcribe',
+        'disabled': False,
+        'title': None,
+        'transcribe': 'Some_video-abc.mp4',
+    }
+    assert result['clears'] == 1
+
+
+def test_completed_transcription_lists_the_transcripts(page_script):
+    result = run_scenario(page_script, 'transcription-completed')
+
+    assert result['groups'] == ['Media', 'Subtitles', 'Transcripts', 'Details']
+    assert f'/downloads/{JOB_ID}/Some_video-abc.transcript.md' in result['links']
+    assert (
+        '|Some_video-abc.transcript.md||2.0 KB||[Download][Show][Delete Some_video-abc.transcript.md]|'
+        in result['rows']
+    )
+    assert (
+        '|Some_video-abc.transcript.json||4.0 KB||[Download][Delete Some_video-abc.transcript.json]|' in result['rows']
+    )
+    assert result['transcriptions'] == [
+        'Transcribed by gemini-3.5-flash-lite||Warning: The transcript ends at &lt;00:04:00&gt;.|'
+    ]
+    assert transcribe_buttons(result)[0]['text'] == 'Transcribe again'
+    assert result['clears'] == 1
+
+
+def test_transcribe_posts_with_the_csrf_token_and_polls_until_it_ends(page_script):
+    result = run_scenario(page_script, 'transcribe-click')
+
+    assert result['fetches'][1] == {
+        'url': f'/downloads/{JOB_ID}/%22%3E%3Cimg%20src%3Dx%20onerror%3Dalert(1)%3E.mp4/transcribe',
+        'method': 'POST',
+        'body': None,
+        'csrf': 'page-token',
+    }
+    assert result['fetches'][2]['url'] == f'/status/{JOB_ID}'
+    assert result['transcriptions'] == ['||Transcription queued...']
+    # The first poll found nothing running and stopped, the queued transcription started polling again
+    assert (result['intervals'], result['clears']) == (2, 1)
+    assert result['alerts'] == []
+
+
+def test_refused_transcribe_tells_the_user(page_script):
+    result = run_scenario(page_script, 'transcribe-refused')
+
+    assert result['alerts'] == ['This file is already being transcribed.']
+
+
+def test_show_renders_the_transcript_escaped(page_script):
+    result = run_scenario(page_script, 'transcript-show')
+
+    assert result['fetches'][1]['url'] == f'/downloads/{JOB_ID}/Some_video-abc.transcript.md'
+    assert result['transcriptText'] == ['# Some video\n\n**[00:01] Speaker 1:** &lt;script&gt;alert(1)&lt;/script&gt;']
+    assert '<script>' not in result['html']
+    assert '[Download][Hide][Delete Some_video-abc.transcript.md]' in result['rows'][4]

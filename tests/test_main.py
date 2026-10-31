@@ -690,7 +690,7 @@ def test_legacy_job_lists_its_media_as_artifacts(client, downloads_dir):
     status = client.get(f'/status/{LEGACY_JOB_ID}').json()
 
     assert status['artifacts'] == [
-        {'name': 'Old_Video-abc.mp4', 'kind': 'media', 'size': 9, 'lang': None, 'auto': None}
+        {'name': 'Old_Video-abc.mp4', 'kind': 'media', 'size': 9, 'lang': None, 'auto': None, 'media': None}
     ]
     assert status['completed_at'] is None
 

@@ -24,6 +24,8 @@ ACTIVE_STATUSES = ('pending', 'downloading')
 MEDIA = 'media'
 SUBTITLE = 'subtitle'
 INFO = 'info'
+# Text made from a media file: <media stem>.transcript.md and .transcript.json, never deleted by the GC
+TRANSCRIPT = 'transcript'
 
 
 # Serialises the read-modify-write of metadata between a user's delete and the garbage collector's thread

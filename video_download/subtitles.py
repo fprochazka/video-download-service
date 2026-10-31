@@ -66,3 +66,36 @@ def subtitle_track_of(filename: str, tracks: dict[str, bool]) -> str | None:
         if stem.endswith('.' + key):
             return key
     return None
+
+
+VTT_CUE_TIME_RE = re.compile(r'^(?:(\d+):)?(\d{1,2}):(\d{2})[.,](\d{3})\s+-->')
+VTT_TAG_RE = re.compile(r'<[^>]*>')
+
+
+def vtt_cues(content: str) -> list[tuple[float, str]]:
+    """(start in seconds, text) of each cue of a WebVTT file, without styling tags.
+
+    YouTube's automatic captions repeat the previous line at the top of each cue as the text rolls up, a line equal to
+    the last one kept is dropped.
+    """
+    cues = []
+    last_line = None
+    start = None
+    for raw_line in content.splitlines():
+        line = raw_line.strip()
+        if match := VTT_CUE_TIME_RE.match(line):
+            hours, minutes, seconds, millis = match.groups()
+            start = int(hours or 0) * 3600 + int(minutes) * 60 + int(seconds) + int(millis) / 1000
+            continue
+        if not line:
+            # A blank line ends the cue; cue identifiers and NOTE blocks outside a cue are skipped
+            start = None
+            continue
+        if start is None:
+            continue
+        text = ' '.join(VTT_TAG_RE.sub('', line).replace('&nbsp;', ' ').split())
+        text = text.replace('&amp;', '&').replace('&lt;', '<').replace('&gt;', '>')
+        if text and text != last_line:
+            cues.append((start, text))
+            last_line = text
+    return cues

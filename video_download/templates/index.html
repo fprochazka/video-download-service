@@ -199,6 +199,33 @@
         .files-list button.danger:hover {
             background-color: #b02a37;
         }
+        .file-transcription {
+            flex: 1 1 100%;
+            color: #495057;
+            font-size: 13px;
+        }
+        .file-transcription.failed {
+            color: #721c24;
+        }
+        .file-transcription .spinner {
+            width: 10px;
+            height: 10px;
+        }
+        .transcript-text {
+            white-space: pre-wrap;
+            word-break: break-word;
+            max-height: 400px;
+            overflow-y: auto;
+            margin: 0 0 8px 0;
+            padding: 10px;
+            background-color: white;
+            border: 1px solid #dee2e6;
+            border-radius: 4px;
+            font-family: inherit;
+            font-size: 13px;
+            line-height: 1.5;
+            color: #212529;
+        }
         .files-list li.file-deleted {
             color: #6c757d;
             border-left-color: #ced4da;
@@ -309,6 +336,9 @@
 
         let pollInterval = null;
 
+        // The transcript the user opened with Show, kept across the re-renders of polling: { name, text }
+        let shownTranscript = null;
+
         // Sent with every POST and DELETE, the server compares it with the csrf_token cookie
         const csrfToken = document.getElementById('csrfToken').content;
 
@@ -321,6 +351,20 @@
             network: 'A network error occurred, try again later.',
             interrupted: 'The service restarted during the download, try again.',
         };
+
+        const TRANSCRIPTION_HINTS = {
+            not_configured: 'Set GEMINI_API_KEY in app.env on the server (see README) and restart it.',
+            rate_limited: 'Gemini is rate-limiting the API key, try again in a minute.',
+            output_truncated: 'The recording is too long for one request, transcribing in parts is not supported yet.',
+            blocked: 'Gemini refused the content (safety or recitation filter).',
+            invalid_response: 'Gemini returned a malformed transcript, try again.',
+            provider_error: 'The Gemini API failed, try again later.',
+            audio_extraction_failed: 'ffmpeg could not read the audio of this file.',
+            media_missing: 'The media file was deleted.',
+            interrupted: 'The service restarted during the transcription, try again.',
+        };
+
+        const TRANSCRIPTION_UNAVAILABLE = 'Transcription is not configured on the server (GEMINI_API_KEY, see README)';
 
         function escapeHtml(value) {
             return String(value)
@@ -359,6 +403,7 @@
         const FILE_GROUPS = [
             { kind: 'media', title: 'Media' },
             { kind: 'subtitle', title: 'Subtitles' },
+            { kind: 'transcript', title: 'Transcripts' },
             { kind: 'info', title: 'Details' },
         ];
 
@@ -379,21 +424,75 @@
             return artifact.auto ? `${artifact.lang}, auto` : artifact.lang;
         }
 
-        // One entry per button of a file row, a new action is one more entry
-        function fileActions(downloadId, artifact) {
-            const href = `/downloads/${encodeURIComponent(downloadId)}/${encodeURIComponent(artifact.name)}`;
-            return [
-                `<a href="${escapeHtml(href)}" download>Download</a>`,
-                `<button type="button" class="danger" data-delete-file="${escapeHtml(artifact.name)}">Delete</button>`,
-            ];
+        function fileHref(downloadId, name) {
+            return `/downloads/${encodeURIComponent(downloadId)}/${encodeURIComponent(name)}`;
         }
 
-        function renderFileRow(downloadId, artifact) {
+        function isTranscriptionActive(transcription) {
+            return !!transcription && (transcription.status === 'pending' || transcription.status === 'running');
+        }
+
+        function hasActiveTranscription(status) {
+            return Object.values(status.transcriptions || {}).some(isTranscriptionActive);
+        }
+
+        function transcribeButton(status, artifact) {
+            const name = escapeHtml(artifact.name);
+            if (!status.transcription_available) {
+                return `<button type="button" disabled title="${escapeHtml(TRANSCRIPTION_UNAVAILABLE)}">Transcribe</button>`;
+            }
+            const transcription = (status.transcriptions || {})[artifact.name];
+            if (isTranscriptionActive(transcription)) {
+                return `<button type="button" disabled data-transcribe-file="${name}">Transcribing...</button>`;
+            }
+            const label = transcription && transcription.status === 'completed' ? 'Transcribe again' : 'Transcribe';
+            return `<button type="button" data-transcribe-file="${name}">${label}</button>`;
+        }
+
+        // One entry per button of a file row, a new action is one more entry
+        function fileActions(status, artifact) {
+            const actions = [`<a href="${escapeHtml(fileHref(status.download_id, artifact.name))}" download>Download</a>`];
+            if (artifact.kind === 'media') {
+                actions.push(transcribeButton(status, artifact));
+            }
+            if (artifact.kind === 'transcript' && artifact.name.endsWith('.md')) {
+                const shown = shownTranscript && shownTranscript.name === artifact.name;
+                actions.push(`<button type="button" class="secondary" data-show-transcript="${escapeHtml(artifact.name)}">${shown ? 'Hide' : 'Show'}</button>`);
+            }
+            actions.push(`<button type="button" class="danger" data-delete-file="${escapeHtml(artifact.name)}">Delete</button>`);
+            return actions;
+        }
+
+        function renderTranscriptionState(transcription) {
+            if (!transcription) return '';
+            if (transcription.status === 'pending') {
+                return '<div class="file-transcription"><span class="spinner"></span>Transcription queued...</div>';
+            }
+            if (transcription.status === 'running') {
+                return '<div class="file-transcription"><span class="spinner"></span>Transcribing with Gemini, this takes a few minutes...</div>';
+            }
+            if (transcription.status === 'failed') {
+                const hint = TRANSCRIPTION_HINTS[transcription.error_code];
+                return '<div class="file-transcription failed">'
+                    + `Transcription failed: ${escapeHtml(transcription.error || 'unknown error')}`
+                    + (hint ? `<br><small>${escapeHtml(hint)}</small>` : '')
+                    + '</div>';
+            }
+            if (transcription.status === 'completed') {
+                const warnings = (transcription.warnings || []).map(w => `<br><small>Warning: ${escapeHtml(w.message)}</small>`);
+                return `<div class="file-transcription">Transcribed by ${escapeHtml(transcription.model || 'Gemini')}${warnings.join('')}</div>`;
+            }
+            return '';
+        }
+
+        function renderFileRow(status, artifact) {
             const meta = [subtitleLabel(artifact), formatSize(artifact.size)].filter(Boolean).join(' · ');
+            const transcription = artifact.kind === 'media' ? (status.transcriptions || {})[artifact.name] : null;
             return '<li class="file-row">'
                 + `<span class="file-name">${escapeHtml(artifact.name)}</span>`
                 + `<span class="file-meta">${escapeHtml(meta)}</span>`
-                + `<span class="file-actions">${fileActions(downloadId, artifact).join('')}</span>`
+                + `<span class="file-actions">${fileActions(status, artifact).join('')}</span>`
+                + renderTranscriptionState(transcription)
                 + '</li>';
         }
 
@@ -412,11 +511,53 @@
                 const deleted = deletedFiles.filter(file => file.kind === group.kind);
                 if (rows.length === 0 && deleted.length === 0) return;
                 html += `<h4 class="files-group">${escapeHtml(group.title)}</h4><ul class="files-list">`;
-                rows.forEach(artifact => { html += renderFileRow(status.download_id, artifact); });
+                rows.forEach(artifact => { html += renderFileRow(status, artifact); });
                 deleted.forEach(file => { html += renderDeletedFile(file); });
                 html += '</ul>';
+                if (shownTranscript && rows.some(artifact => artifact.name === shownTranscript.name)) {
+                    html += `<pre class="transcript-text">${escapeHtml(shownTranscript.text)}</pre>`;
+                }
             });
             return html;
+        }
+
+        function ensurePolling(downloadId) {
+            if (!pollInterval) {
+                pollInterval = setInterval(() => pollStatus(downloadId), 5000);
+            }
+        }
+
+        async function transcribeFile(downloadId, filename) {
+            try {
+                const response = await fetch(`${fileHref(downloadId, filename)}/transcribe`, {
+                    method: 'POST',
+                    headers: { 'X-CSRF-Token': csrfToken },
+                });
+                if (!response.ok) {
+                    throw new Error(await responseDetail(response, `Could not start the transcription (HTTP ${response.status})`));
+                }
+            } catch (error) {
+                alert(error.message);
+            }
+            await pollStatus(downloadId);
+        }
+
+        async function toggleTranscript(downloadId, filename) {
+            if (shownTranscript && shownTranscript.name === filename) {
+                shownTranscript = null;
+            } else {
+                try {
+                    const response = await fetch(fileHref(downloadId, filename));
+                    if (!response.ok) {
+                        throw new Error(`Could not load the transcript (HTTP ${response.status})`);
+                    }
+                    shownTranscript = { name: filename, text: await response.text() };
+                } catch (error) {
+                    alert(error.message);
+                    return;
+                }
+            }
+            await pollStatus(downloadId);
         }
 
         async function deleteFile(downloadId, filename) {
@@ -477,7 +618,12 @@
                     statusDiv.innerHTML = `<div><span class="spinner"></span>${message}</div>`;
                     cancelBtn.style.display = 'inline-block';
                 } else if (status.status === 'completed') {
-                    stopPolling();
+                    // A transcription of one of the files runs after the download, keep polling until it ends
+                    if (hasActiveTranscription(status)) {
+                        ensurePolling(downloadId);
+                    } else {
+                        stopPolling();
+                    }
                     submitBtn.disabled = false;
                     cancelBtn.style.display = 'none';
                     urlInput.value = ''; // Clear the input field
@@ -637,10 +783,15 @@
         });
 
         statusDiv.addEventListener('click', (e) => {
-            const filename = e.target.dataset ? e.target.dataset.deleteFile : undefined;
+            const dataset = e.target.dataset || {};
             const downloadId = jobIdFromPath();
-            if (filename && downloadId) {
-                deleteFile(downloadId, filename);
+            if (!downloadId || e.target.disabled) return;
+            if (dataset.deleteFile) {
+                deleteFile(downloadId, dataset.deleteFile);
+            } else if (dataset.transcribeFile) {
+                transcribeFile(downloadId, dataset.transcribeFile);
+            } else if (dataset.showTranscript) {
+                toggleTranscript(downloadId, dataset.showTranscript);
             }
         });
 

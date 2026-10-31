@@ -22,6 +22,7 @@ downloads/*
 .env
 *.env
 !.env.example
+!app.env.example
 
 # Cookies (contain login sessions)
 cookies.txt

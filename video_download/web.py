@@ -8,17 +8,19 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, Form, HTTPException, Request
-from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from pydantic import BaseModel
 
-from video_download import cleanup, config
+from video_download import cleanup, config, transcription
 from video_download.csrf import page_token, require_csrf, set_token_cookie
 from video_download.jobs import create_job, download_video_task, fail_interrupted_downloads
 from video_download.storage import ACTIVE_STATUSES, job_artifacts, load_metadata, media_files, remove_artifacts
 from video_download.urls import InvalidDownloadUrl, resolve_download_url
-from video_download.worker import DOWNLOAD, JobWorker
+from video_download.worker import DOWNLOAD, TRANSCRIPTION, JobWorker
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+# httpx logs every request URL of the Gemini SDK at INFO, nothing the service log needs
+logging.getLogger('httpx').setLevel(logging.WARNING)
 
 TEMPLATES_DIR = Path(__file__).parent / 'templates'
 FAVICON_FILE = Path(__file__).parent / 'static' / 'favicon.svg'
@@ -32,8 +34,9 @@ class DownloadInitResponse(BaseModel):
 
 class Artifact(BaseModel):
     name: str
-    kind: str  # media, subtitle, info
+    kind: str  # media, subtitle, info, transcript
     size: int | None = None
+    media: str | None = None  # transcript: the media file it was made from
     lang: str | None = None  # subtitle track key, e.g. en, en-US, cs-orig
     auto: bool | None = None  # subtitle is automatic captions
 
@@ -44,6 +47,30 @@ class DeletedFile(BaseModel):
     size: int | None = None
     deleted_at: str
     reason: str  # user, gc
+
+
+class TranscriptionUsage(BaseModel):
+    prompt_tokens: int = 0
+    output_tokens: int = 0
+    thinking_tokens: int = 0
+
+
+class TranscriptionWarning(BaseModel):
+    code: str
+    message: str
+
+
+class Transcription(BaseModel):
+    status: str  # pending, running, completed, failed
+    model: str | None = None
+    requested_at: str | None = None
+    started_at: str | None = None
+    completed_at: str | None = None
+    error: str | None = None
+    error_code: str | None = None
+    warnings: list[TranscriptionWarning] = []
+    usage: TranscriptionUsage | None = None
+    files: list[str] = []
 
 
 class DownloadStatus(BaseModel):
@@ -60,6 +87,9 @@ class DownloadStatus(BaseModel):
     error_type: str | None = None
     used_youtube_cookies: bool | None = None
     subtitles_error: str | None = None
+    transcriptions: dict[str, Transcription] = {}
+    # Whether the server can transcribe at all (GEMINI_API_KEY is set), the page disables its Transcribe buttons if not
+    transcription_available: bool = False
     created_at: str
     updated_at: str
     completed_at: str | None = None
@@ -84,8 +114,9 @@ class DownloadStatus(BaseModel):
 async def lifespan(fastapi_app: FastAPI):
     config.DOWNLOADS_DIR.mkdir(parents=True, exist_ok=True)
     fail_interrupted_downloads(config.DOWNLOADS_DIR)
+    transcription.fail_interrupted_transcriptions(config.DOWNLOADS_DIR)
 
-    worker = JobWorker({DOWNLOAD: config.download_concurrency()})
+    worker = JobWorker({DOWNLOAD: config.download_concurrency(), TRANSCRIPTION: config.transcription_concurrency()})
     worker.start()
     fastapi_app.state.worker = worker
 
@@ -165,7 +196,14 @@ async def get_download_status(download_id: uuid.UUID):
 
 def status_response(download_dir: Path, metadata: dict) -> DownloadStatus:
     return DownloadStatus(
-        **(metadata | {'files': media_files(metadata), 'artifacts': job_artifacts(download_dir, metadata)})
+        **(
+            metadata
+            | {
+                'files': media_files(metadata),
+                'artifacts': job_artifacts(download_dir, metadata),
+                'transcription_available': config.transcription_settings().available,
+            }
+        )
     )
 
 
@@ -197,7 +235,37 @@ async def delete_download_file(download_id: uuid.UUID, filename: str):
         raise HTTPException(status_code=404, detail='File not found')
     if (download_dir / filename).resolve().parent != download_dir.resolve():
         raise HTTPException(status_code=404, detail='File not found')
+    if transcription.is_active(metadata, filename):
+        raise HTTPException(status_code=409, detail='The file is being transcribed, delete it after that ends.')
 
     metadata = remove_artifacts(download_dir, {filename}, reason='user')
     logger.info('Download %s: deleted %s on user request', download_id, filename)
+    return status_response(download_dir, metadata)
+
+
+@app.post('/downloads/{download_id}/{filename}/transcribe', status_code=202, dependencies=[Depends(require_csrf)])
+async def transcribe_file(request: Request, download_id: uuid.UUID, filename: str):
+    """Queue a transcription of one media file of a completed job; returns the job's status"""
+    download_dir = config.DOWNLOADS_DIR / str(download_id)
+    metadata = load_metadata(download_dir)
+    if not metadata or filename not in transcription.media_artifact_names(download_dir, metadata):
+        raise HTTPException(status_code=404, detail='File not found')
+    path = (download_dir / filename).resolve()
+    if path.parent != download_dir.resolve() or not path.is_file():
+        raise HTTPException(status_code=404, detail='File not found')
+    if metadata.get('status') != 'completed':
+        raise HTTPException(status_code=409, detail='The download has not completed, transcribe it after it does.')
+    settings = config.transcription_settings()
+    if not settings.available:
+        return JSONResponse(
+            status_code=503,
+            content={'detail': transcription.ERROR_MESSAGES['not_configured'], 'error_code': 'not_configured'},
+        )
+    try:
+        metadata = transcription.request_transcription(download_dir, filename, settings.model)
+    except transcription.TranscriptionConflict:
+        raise HTTPException(status_code=409, detail='This file is already being transcribed.') from None
+
+    request.app.state.worker.enqueue(TRANSCRIPTION, transcription.transcribe_media_task, str(download_id), filename)
+    logger.info('Download %s: transcription of %s queued', download_id, filename)
     return status_response(download_dir, metadata)

@@ -39,6 +39,10 @@ CLAUDE.md
 .DS_Store
 *.log
 
+# Environment files with secrets (GEMINI_API_KEY, TS_AUTHKEY), compose passes them at runtime
+.env
+*.env
+
 # YouTube account cookies (a full Google session), see README
 youtube_cookies.txt
 

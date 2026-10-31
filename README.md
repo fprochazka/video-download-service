@@ -21,6 +21,7 @@ A simple web service for downloading videos from various platforms using yt-dlp 
   - `downloading` - Video being downloaded
   - `completed` - At least one media file was downloaded
   - `failed` - Error occurred, or yt-dlp finished without a media file (details in `error`, `error_code`, `error_type`)
+- **Transcription** - A Transcribe button on each media file sends its audio to Google Gemini and adds a Markdown and a JSON transcript with timestamps and speaker labels to the job, see [Transcription](#transcription)
 - **Cleanup of old media** - Media files over 5 MB are deleted 90 days after their job finished, the job page and its subtitles and details stay, see [Garbage collection](#garbage-collection)
 - **Restart safety** - Downloads that were running when the service stopped are marked `failed` with `error_code` `interrupted` on the next start
 
@@ -59,7 +60,7 @@ The frontend tests run the page script in Node.js against a stubbed DOM, pytest 
 
 The downloads directory defaults to `./downloads` and can be changed with the `DOWNLOADS_DIR` environment variable.
 
-Downloads run in an in-process worker, at most `DOWNLOAD_CONCURRENCY` (default `2`) at the same time; further jobs wait as `pending`. The queue lives in memory: jobs still queued or running when the service stops are marked `interrupted` on the next start.
+Downloads run in an in-process worker, at most `DOWNLOAD_CONCURRENCY` (default `2`) at the same time; further jobs wait as `pending`. Transcriptions have their own queue, limited by `TRANSCRIPTION_CONCURRENCY` (default `2`). The queue lives in memory: jobs still queued or running when the service stops are marked `interrupted` on the next start.
 
 ## Running the Application
 
@@ -280,6 +281,77 @@ The configuration file is automatically loaded if present. This allows you to fi
 
 Some options are owned by the service and always override `YTDLP_OPTS`: `ignoreerrors` (always off, so failures are reported as failures), `noplaylist`, `restrictfilenames`, `paths`, `outtmpl` and `logger`. The default `format` (`bv*+ba/b`) and `merge_output_format` (`mp4`) can be overridden.
 
+### Transcription
+
+The job page has a Transcribe button on each media file of a completed job. The service then extracts the audio with ffmpeg, sends it to the Gemini Developer API in one request, and stores the transcript next to the media as two files:
+
+- `<media name>.transcript.md` - the title, then one paragraph per speaker turn, for example `**[01:05] Speaker 1:** text`
+- `<media name>.transcript.json` - the segments (`start` and `end` in whole seconds, `speaker`, `text`), the model, the token usage and the warnings. Gemini gives only the start of each segment, so a segment's `end` is the start of the next one
+
+The page lists both under Transcripts, with a Show button that displays the Markdown text. Transcribing a file again replaces both files. A 6-minute video takes about 10 seconds to transcribe.
+
+#### Setup
+
+1. Create an API key at https://aistudio.google.com/apikey, in a Google Cloud project with billing enabled. On the free tier Google may use the audio for training, and its terms allow only paid services for apps that serve users in the EEA.
+2. Copy the example settings and put the key in `GEMINI_API_KEY`:
+   ```bash
+   cp app.env.example app.env
+   chmod 600 app.env
+   ```
+3. Restart the service: `docker-compose up -d`. Compose reads `app.env` into the app container; without the file the service starts with transcription off, and the Transcribe button is disabled.
+
+For local development, export the variables before you start uvicorn: `set -a; . ./app.env; set +a`.
+
+`TRANSCRIPTION_MODEL` selects the model, the default is `gemini-3.5-flash-lite`. `app.env` is gitignored and excluded from the Docker image. The service never logs the key.
+
+#### Cost
+
+On `gemini-3.5-flash-lite` a 6-minute video of dense dialogue took 11.3k input tokens (the audio counts 32 tokens per second) and 4.0k output tokens. At the list price of $0.30 per million input and $2.50 per million output tokens that is $0.013, about $0.13 per hour of speech. The output is most of the bill, so a recording with less speech costs less.
+
+The default comes from a comparison on that video, scored against its manual subtitles:
+
+- `gemini-3.5-flash-lite` writing `[HH:MM:SS] Speaker 1: text` lines: 96% of the subtitle words, timestamps within 2 seconds, $0.013.
+- The same model, and `gemini-3.5-flash` and `gemini-3.1-pro-preview`, answering in a JSON response schema: all three lost a third of the speech or repeated passages, with timestamps up to two minutes late, at $0.02 to $0.14.
+- `gemini-3.5-transcribe`: 93% of the words, word timestamps that a speech model computes, $0.036. It takes no prompt, so it cannot use the title, description or subtitles for names, and its docs limit a request with speaker labels to 30 minutes. The service does not support it.
+
+#### What the service sends to Google
+
+- the audio of the media file, mono 16 kHz Opus, uploaded to the Files API and deleted right after the request
+- the title, uploader, channel, description and chapters of the video
+- the text of one subtitle track of the job (a manual track first, else the speech recognition track), as a reference that may be wrong. Its timestamps are left out: subtitles timed for another edit of the video made Gemini copy their times
+
+The video's own text goes into the prompt in tagged blocks with `<`, `>` and `&` escaped, and the instructions tell the model to treat it as data. A description that contains instructions therefore cannot end its block, but a model can still be influenced by text it reads.
+
+#### Limits of the current version
+
+- The whole recording goes in one request. Long recordings get worse before they hit a limit; only a 6-minute video was tested.
+- The output limit of a request (65,536 tokens) is reached at about 50 to 100 minutes of speech. The transcription then fails with `output_truncated`. Cutting the audio into parts is not supported yet.
+- Timestamps come from the model and can drift; they are approximate.
+- Speaker labels are `Speaker 1`, `Speaker 2` unless the audio or the description names the speaker.
+
+The service checks the result and stores warnings in `warnings`; they do not fail the transcription:
+
+- `ends_early` - the last segment ends long before the end of the media, so speech may be missing or the timestamps drifted
+- `beyond_duration` - timestamps past the end of the media
+- `timestamps_out_of_order` - segments that end before they start, or out of order
+- `repeated_text` - several lines appear twice, Gemini likely repeated a part of the recording
+- `low_coverage` - the transcript has less than 60% of the text of the subtitles
+- `no_speech` - the transcript is empty
+- `unparsed_lines` - lines of the answer that were not `[HH:MM:SS]` transcript lines, left out
+
+A failed transcription has an `error` and one of these `error_code` values:
+
+- `not_configured` - `GEMINI_API_KEY` is not set
+- `rate_limited` - Gemini answered HTTP 429, try again later
+- `provider_error` - another Gemini API error, or an answer that ended without a reason Gemini documents as complete
+- `output_truncated` - the answer hit the output token limit; a cut-off transcript is never stored
+- `blocked` - Gemini's safety or recitation filter stopped the answer
+- `invalid_response` - the answer had no `[HH:MM:SS]` transcript line
+- `audio_extraction_failed` - ffmpeg could not read the audio
+- `media_missing` - the media file was deleted before the transcription started
+- `interrupted` - the service restarted while the transcription was queued or running
+- `unknown` - anything else
+
 ### Garbage collection
 
 The service deletes large media of old jobs, so the downloads directory does not grow forever. It runs once in the background a moment after startup, then every `GC_INTERVAL_HOURS`.
@@ -287,8 +359,8 @@ The service deletes large media of old jobs, so the downloads directory does not
 - A media file larger than `GC_MIN_SIZE_MB` is deleted once its job finished more than `GC_MAX_AGE_DAYS` ago. Leftover partial downloads (`*.part`, `*.ytdl`) of such a job go by the same rule.
 - Partial downloads of a `failed` job are deleted once the job is older than one day, whatever their size.
 - The job's age comes from `completed_at`. Jobs created before that field existed use `updated_at`, then `created_at`. File modification times are never used, yt-dlp can set them from the server's `Last-Modified` header.
-- `metadata.json`, `download.log`, subtitles and `info.json` are never deleted, so the job page keeps working. Each deleted file is listed in the job's `deleted_files` with `reason` `gc`.
-- Jobs that are `pending` or `downloading` are skipped.
+- `metadata.json`, `download.log`, subtitles, transcripts and `info.json` are never deleted, so the job page keeps working. Each deleted file is listed in the job's `deleted_files` with `reason` `gc`.
+- Jobs that are `pending` or `downloading`, or have a transcription queued or running, are skipped.
 
 Each deleted file gets one INFO line in the service log, and each run ends with a summary line of the file count and the megabytes freed.
 
@@ -311,6 +383,9 @@ video-download/
 │   ├── web.py           # FastAPI app and routes
 │   ├── jobs.py          # Job creation, the download task, the startup sweep
 │   ├── worker.py        # In-process job queues with a concurrency limit per lane
+│   ├── transcription.py # Transcription pipeline: prompt, answer parsing, checks, transcript files
+│   ├── gemini.py        # Gemini Developer API calls (Files API upload, generate_content)
+│   ├── audio.py         # ffmpeg audio extraction and ffprobe duration
 │   ├── ytdlp.py         # yt-dlp options and the files and metadata a download produced
 │   ├── subtitles.py     # Which subtitle tracks a job downloads
 │   ├── cleanup.py       # Garbage collection of large old media
@@ -330,7 +405,9 @@ video-download/
 │       ├── download.log     # yt-dlp output for this download
 │       ├── info.json        # yt-dlp's video details
 │       ├── Video_Title-id.mp4   # Downloaded video (URL-safe filename)
-│       └── Video_Title-id.en.vtt   # Subtitles, one file per track
+│       ├── Video_Title-id.en.vtt   # Subtitles, one file per track
+│       ├── Video_Title-id.transcript.md     # Transcript, see Transcription
+│       └── Video_Title-id.transcript.json   # The same transcript as data
 └── pyproject.toml       # UV project configuration
 ```
 
@@ -352,7 +429,11 @@ video-download/
   - Serves only the files listed in the job's `artifacts`; `metadata.json` and `download.log` are not public
 - `DELETE /downloads/{download_id}/{filename}` - Delete one file of the job's `artifacts`, requires the CSRF token
   - Returns the job's status; records the file in `deleted_files`
-  - 404 for an unknown job or a file that is not an artifact (including `metadata.json` and `download.log`), 409 while the job is `pending` or `downloading`
+  - 404 for an unknown job or a file that is not an artifact (including `metadata.json` and `download.log`), 409 while the job is `pending` or `downloading`, or while the file is being transcribed
+  - Deleting a media file keeps its transcripts
+- `POST /downloads/{download_id}/{filename}/transcribe` - Queue a transcription of one media file, requires the CSRF token
+  - Returns HTTP 202 with the job's status, the file's entry in `transcriptions` is `pending`
+  - 404 for an unknown job or a file that is not a media artifact, 409 when the job is not `completed` or the file already has a transcription `pending` or `running`, 503 with `{"detail": "...", "error_code": "not_configured"}` without `GEMINI_API_KEY`
 
 ### CSRF protection
 
@@ -376,6 +457,20 @@ Each download creates a `metadata.json` file with:
     {"name": "info.json", "kind": "info", "size": 350000}
   ],
   "subtitles_error": null,
+  "transcriptions": {
+    "Video_Title-dQw4w9WgXcQ.mp4": {
+      "status": "completed",
+      "model": "gemini-3.5-flash-lite",
+      "requested_at": "2025-01-14T12:10:00+00:00",
+      "started_at": "2025-01-14T12:10:00+00:00",
+      "completed_at": "2025-01-14T12:10:25+00:00",
+      "error": null,
+      "error_code": null,
+      "warnings": [],
+      "usage": {"prompt_tokens": 11293, "output_tokens": 4019, "thinking_tokens": 0},
+      "files": ["Video_Title-dQw4w9WgXcQ.transcript.md", "Video_Title-dQw4w9WgXcQ.transcript.json"]
+    }
+  },
   "deleted_files": [
     {"name": "Video_Title-dQw4w9WgXcQ.en-GB.vtt", "kind": "subtitle", "size": 40000, "deleted_at": "2025-01-15T08:00:00+00:00", "reason": "user"}
   ],
@@ -398,7 +493,9 @@ Each download creates a `metadata.json` file with:
 }
 ```
 
-`files` lists only the media; `artifacts` lists every downloadable file of the job with its `kind` (`media`, `subtitle`, `info`). For a subtitle, `lang` is yt-dlp's track key (`en`, `en-GB`, `cs-orig`) and `auto` is `true` for automatic captions. `deleted_files` keeps a record of every file removed from `artifacts`; `reason` is `user` for the delete button and `gc` for the [garbage collection](#garbage-collection), which also records leftover partial downloads with `kind` `partial`. Jobs created before artifacts existed have no `artifacts` and no `completed_at`; `/status` lists their media files as artifacts.
+`files` lists only the media; `artifacts` lists every downloadable file of the job with its `kind` (`media`, `subtitle`, `info`, `transcript`). A transcript names its media file in `media`. For a subtitle, `lang` is yt-dlp's track key (`en`, `en-GB`, `cs-orig`) and `auto` is `true` for automatic captions. `deleted_files` keeps a record of every file removed from `artifacts`; `reason` is `user` for the delete button and `gc` for the [garbage collection](#garbage-collection), which also records leftover partial downloads with `kind` `partial`. Jobs created before artifacts existed have no `artifacts` and no `completed_at`; `/status` lists their media files as artifacts.
+
+`transcriptions` holds one entry per media file that was ever transcribed, keyed by the media file name; `status` is `pending`, `running`, `completed` or `failed`, see [Transcription](#transcription) for the warnings and error codes. `/status` also returns `transcription_available`, `true` when the server has a Gemini API key.
 
 YouTube jobs also carry `used_youtube_cookies` (`true` when the retry with `youtube_cookies.txt` ran).
 
@@ -429,6 +526,7 @@ YouTube jobs also carry `used_youtube_cookies` (`true` when the retry with `yout
 
 - **FastAPI** - Web framework
 - **yt-dlp** - Video download library
+- **google-genai** - Gemini Developer API client for transcription
 - **Uvicorn** - ASGI server
 - **HTML/CSS/JavaScript** - Frontend with polling
 - **Python asyncio** - The job worker, queues with a concurrency limit each
