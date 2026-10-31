@@ -21,7 +21,6 @@ YTDLP_OPTS = {
     # 'retries': 3,
     # 'fragment_retries': 3,
     # 'socket_timeout': 30,
-
     # Example: Rate limiting
     # 'ratelimit': 1000000,  # bytes per second
     # 'sleep_interval': 5,
