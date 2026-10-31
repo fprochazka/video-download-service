@@ -59,6 +59,8 @@ The frontend tests run the page script in Node.js against a stubbed DOM, pytest 
 
 The downloads directory defaults to `./downloads` and can be changed with the `DOWNLOADS_DIR` environment variable.
 
+Downloads run in an in-process worker, at most `DOWNLOAD_CONCURRENCY` (default `2`) at the same time; further jobs wait as `pending`. The queue lives in memory: jobs still queued or running when the service stops are marked `interrupted` on the next start.
+
 ## Running the Application
 
 ### Using UV (Local Development)
@@ -307,7 +309,8 @@ video-download/
 ├── main.py              # Entrypoint, runs the FastAPI app with uvicorn
 ├── video_download/
 │   ├── web.py           # FastAPI app and routes
-│   ├── jobs.py          # Job creation, the background download task, the startup sweep
+│   ├── jobs.py          # Job creation, the download task, the startup sweep
+│   ├── worker.py        # In-process job queues with a concurrency limit per lane
 │   ├── ytdlp.py         # yt-dlp options and the files and metadata a download produced
 │   ├── subtitles.py     # Which subtitle tracks a job downloads
 │   ├── cleanup.py       # Garbage collection of large old media
@@ -417,15 +420,15 @@ YouTube jobs also carry `used_youtube_cookies` (`true` when the retry with `yout
 1. **Submit** - User submits URL via form
 2. **ID Generation** - Server creates a download directory named by a new UUIDv7
 3. **Immediate Response** - ID returned to client, HTTP request completes, the browser opens `/jobs/{uuid}`
-4. **Background Task** - FastAPI BackgroundTasks handles actual download
+4. **Job queue** - The job goes into the in-process worker's download queue; at most `DOWNLOAD_CONCURRENCY` downloads run at once, the rest wait as `pending`
 5. **Status Updates** - Metadata file updated as download progresses
 6. **Polling** - Frontend polls `/status/{uuid}` every 5 seconds
 7. **Completion** - Files available via `/downloads/{uuid}/{filename}`
 
 ## Technologies Used
 
-- **FastAPI** - Web framework with background tasks
+- **FastAPI** - Web framework
 - **yt-dlp** - Video download library
 - **Uvicorn** - ASGI server
 - **HTML/CSS/JavaScript** - Frontend with polling
-- **Python asyncio** - Async background processing
+- **Python asyncio** - The job worker, queues with a concurrency limit each

@@ -30,6 +30,16 @@ def load_user_config() -> tuple[dict, dict]:
     return EXTRACTOR_ARGS, YTDLP_OPTS
 
 
+def env_int(name: str, default: int) -> int:
+    value = os.environ.get(name)
+    return int(value) if value and value.strip() else default
+
+
+def download_concurrency() -> int:
+    """How many downloads run at the same time, the rest wait in the worker's queue"""
+    return env_int('DOWNLOAD_CONCURRENCY', 2)
+
+
 @dataclass(frozen=True)
 class GcSettings:
     enabled: bool

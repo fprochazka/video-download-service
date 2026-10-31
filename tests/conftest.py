@@ -20,10 +20,19 @@ def downloads_dir(tmp_path, monkeypatch):
     return directory
 
 
+class JobsTestClient(TestClient):
+    """Waits after each request until the jobs it queued on the worker ended, so tests see the finished job"""
+
+    def request(self, *args, **kwargs):
+        response = super().request(*args, **kwargs)
+        self.portal.call(self.app.state.worker.join)
+        return response
+
+
 @pytest.fixture
 def client(downloads_dir):
     """A client that loaded the page first, so its requests carry the CSRF cookie and header like the page's do"""
-    with TestClient(web.app) as test_client:
+    with JobsTestClient(web.app) as test_client:
         test_client.get('/')
         test_client.headers[CSRF_HEADER] = test_client.cookies[CSRF_COOKIE]
         yield test_client

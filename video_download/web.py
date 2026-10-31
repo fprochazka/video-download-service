@@ -7,7 +7,7 @@ import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import BackgroundTasks, Depends, FastAPI, Form, HTTPException, Request
+from fastapi import Depends, FastAPI, Form, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse
 from pydantic import BaseModel
 
@@ -16,6 +16,7 @@ from video_download.csrf import page_token, require_csrf, set_token_cookie
 from video_download.jobs import create_job, download_video_task, fail_interrupted_downloads
 from video_download.storage import ACTIVE_STATUSES, job_artifacts, load_metadata, media_files, remove_artifacts
 from video_download.urls import InvalidDownloadUrl, resolve_download_url
+from video_download.worker import DOWNLOAD, JobWorker
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 
@@ -80,9 +81,13 @@ class DownloadStatus(BaseModel):
 
 
 @asynccontextmanager
-async def lifespan(_app: FastAPI):
+async def lifespan(fastapi_app: FastAPI):
     config.DOWNLOADS_DIR.mkdir(parents=True, exist_ok=True)
     fail_interrupted_downloads(config.DOWNLOADS_DIR)
+
+    worker = JobWorker({DOWNLOAD: config.download_concurrency()})
+    worker.start()
+    fastapi_app.state.worker = worker
 
     gc_settings = config.gc_settings()
     gc_task = None
@@ -95,6 +100,7 @@ async def lifespan(_app: FastAPI):
         gc_task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await gc_task
+    await worker.stop()
 
 
 app = FastAPI(title='Video Download Service', lifespan=lifespan)
@@ -132,7 +138,7 @@ async def job_page(request: Request, download_id: uuid.UUID):
 
 
 @app.post('/download', dependencies=[Depends(require_csrf)])
-async def download_video(background_tasks: BackgroundTasks, url: str = Form(...)):
+async def download_video(request: Request, url: str = Form(...)):
     """Initiate video download and return UUID immediately"""
     url = url.strip()
     try:
@@ -141,7 +147,7 @@ async def download_video(background_tasks: BackgroundTasks, url: str = Form(...)
         raise HTTPException(status_code=400, detail=str(e)) from e
 
     download_id = create_job(url, download_url, extractor)
-    background_tasks.add_task(download_video_task, download_id, url)
+    request.app.state.worker.enqueue(DOWNLOAD, download_video_task, download_id, url)
 
     return DownloadInitResponse(download_id=download_id)
 
