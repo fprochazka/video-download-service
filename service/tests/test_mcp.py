@@ -437,7 +437,7 @@ async def test_the_endpoint_refuses_a_host_it_is_not_served_at(downloads_dir):
 
 
 def test_allowed_hosts_are_the_public_host_and_the_configured_ones(monkeypatch):
-    monkeypatch.setenv('PUBLIC_BASE_URL', 'https://video-download.walrus-hops.ts.net')
+    monkeypatch.setenv('PUBLIC_BASE_URL', 'https://video-download.example.ts.net')
     monkeypatch.setenv('MCP_ALLOWED_HOSTS', 'video-download, 100.64.0.1 ')
 
-    assert config.mcp_allowed_hosts() == ['video-download.walrus-hops.ts.net', 'video-download', '100.64.0.1']
+    assert config.mcp_allowed_hosts() == ['video-download.example.ts.net', 'video-download', '100.64.0.1']

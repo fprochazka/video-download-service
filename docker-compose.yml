@@ -2,9 +2,9 @@ version: '3.8'
 
 services:
   video-download:
-    build: .
+    build: ./service
     container_name: video-download
-    # The uid:gid the app runs as, so the files it writes to the bind mounts belong to the host user, see README
+    # The uid:gid the app runs as, so the files it writes to the bind mounts belong to the host user, see service/README.md
     user: "${APP_UID:-1000}:${APP_GID:-1000}"
     networks:
       - video-download-network
@@ -15,14 +15,12 @@ services:
       - ./instagram_cookies.txt:/app/instagram_cookies.txt
       - ./extractor_config.py:/app/extractor_config.py:ro
     restart: unless-stopped
-    # GEMINI_API_KEY and the other settings, see app.env.example; the app runs without it, transcription is then off
+    # PUBLIC_BASE_URL, GEMINI_API_KEY and the other settings, see app.env.example; without it transcription is off and /mcp answers only localhost
     env_file:
       - path: app.env
         required: false
     environment:
       - PYTHONUNBUFFERED=1
-      # The URL the MCP tools put in front of the file links, and the Host the /mcp endpoint accepts
-      - PUBLIC_BASE_URL=${PUBLIC_BASE_URL:-https://video-download.walrus-hops.ts.net}
 
   ts-video-download:
     image: tailscale/tailscale:latest

@@ -17,6 +17,8 @@ build/
 # Application specific
 downloads/*
 !downloads/.gitignore
+# A local run from service/ keeps its downloads there
+service/downloads/
 
 # Environment variables and secrets
 .env

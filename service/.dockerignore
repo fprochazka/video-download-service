@@ -30,10 +30,6 @@ downloads/*
 
 # Documentation
 README.md
-CLAUDE.md
-
-# CI/CD
-.github/
 
 # Other
 .DS_Store
@@ -49,3 +45,6 @@ youtube_cookies.txt
 # Instagram session cookies, see README
 instagram_cookies.txt
 cookies.txt
+
+# Site-specific yt-dlp settings of a local run, compose mounts its own at runtime
+extractor_config.py

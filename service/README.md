@@ -30,9 +30,10 @@ A simple web service for downloading videos from various platforms using yt-dlp 
 
 1. Make sure you have UV installed
 2. Clone or navigate to this project
-3. Install dependencies:
+3. Install dependencies of the service, which is its own uv project in `service/`:
 
 ```bash
+cd service
 uv sync
 ```
 
@@ -40,7 +41,7 @@ uv sync
 
 This project uses [Ruff](https://github.com/astral-sh/ruff) for code formatting and linting.
 
-**Before committing code changes**, always run:
+**Before committing code changes**, always run in `service/`:
 
 ```bash
 # Check and auto-fix linting issues
@@ -55,23 +56,24 @@ uv run pytest -q
 
 This ensures consistent code style and catches common issues.
 
-GitHub Actions runs the same checks on every push to `master` and on pull requests (`.github/workflows/ci.yml`), and also builds the Docker image, checks that yt-dlp in it finds Deno and ffmpeg, and checks that the app starts.
+GitHub Actions runs the same checks on every push to `master` and on pull requests (`.github/workflows/ci.yml` at the repository root), and also builds the Docker image, checks that yt-dlp in it finds Deno and ffmpeg, and checks that the app starts.
 
 The frontend tests run the page script in Node.js against a stubbed DOM, pytest skips them when `node` is not installed. The audio tests skip without `ffmpeg`.
 
-The downloads directory defaults to `./downloads` and can be changed with the `DOWNLOADS_DIR` environment variable.
+The downloads directory defaults to `downloads` in the working directory and can be changed with the `DOWNLOADS_DIR` environment variable.
 
 Downloads run in an in-process worker, at most `DOWNLOAD_CONCURRENCY` (default `2`) at the same time; further jobs wait as `pending`. Transcriptions have their own queue, limited by `TRANSCRIPTION_CONCURRENCY` (default `2`); the chunks of a long recording run `TRANSCRIPTION_CHUNK_CONCURRENCY` (default `4`) at a time within one transcription. The queue lives in memory: jobs still queued or running when the service stops are marked `interrupted` on the next start.
 
-Measured results of the transcription experiments, and the research behind the design, are in `docs/`: [models](docs/transcription-models.md), [chunking](docs/transcription-chunking.md) and [research notes](docs/research.md). Add a new experiment's findings there, with its date and test recordings.
+Measured results of the transcription experiments, and the research behind the design, are in `docs/` at the repository root: [models](../docs/transcription-models.md), [chunking](../docs/transcription-chunking.md) and [research notes](../docs/research.md). Add a new experiment's findings there, with its date and test recordings.
 
 ## Running the Application
 
 ### Using UV (Local Development)
 
-Start the server with:
+Start the server in `service/` with:
 
 ```bash
+cd service
 uv run python main.py
 ```
 
@@ -83,12 +85,16 @@ uv run uvicorn main:app --reload --host 0.0.0.0 --port 8000
 
 The application will be available at: http://localhost:8000
 
+The service reads `downloads/`, the cookies files and `extractor_config.py` from the directory it runs in, so a local run from `service/` uses the ones in `service/`. Docker Compose mounts the ones at the repository root.
+
 ### Using Docker
+
+The Docker commands run from the repository root, where `docker-compose.yml` is. The image is built from `service/`.
 
 Build the Docker image:
 
 ```bash
-docker build -t video-download .
+docker build -t video-download service
 ```
 
 Run the container:
@@ -154,7 +160,12 @@ Access your service securely over Tailscale network with automatic HTTPS.
    video-download.your-tailnet-name.ts.net
    ```
 
-5. **Access securely:**
+5. **Set the URL in `app.env`** in the repository root, then run `docker-compose up -d` again. The MCP endpoint accepts only this host, and its file links start with it:
+   ```
+   PUBLIC_BASE_URL=https://video-download.your-tailnet-name.ts.net
+   ```
+
+6. **Access securely:**
    ```
    https://video-download.your-tailnet-name.ts.net
    ```
@@ -183,7 +194,7 @@ docker logs ts-video-download
 
 **Access from other devices:** Install Tailscale on phone/tablet, sign in, access the URL.
 
-**Enable public access (Funnel):** Edit `ts-video-download/config/mcp.json` and set `"AllowFunnel": true`
+**Enable public access (Funnel):** Edit `ts-video-download/config/mcp.json` at the repository root and set `"AllowFunnel": true`
 
 ## Usage
 
@@ -223,7 +234,7 @@ ERROR: [Instagram]: This content may be inappropriate: It's unavailable for cert
    - Save the file as `instagram_cookies.txt`
 
 2. **Add cookies to the application:**
-   - Place `instagram_cookies.txt` in the project root directory
+   - Place `instagram_cookies.txt` in the repository root, next to `docker-compose.yml`
    - The application sends it only to Instagram jobs, other sites get no cookies; for YouTube see [YouTube login](#youtube-login-optional-not-enabled-by-default)
    - For Docker: mount it as a volume in `docker-compose.yml`:
      ```yaml
@@ -273,7 +284,7 @@ More in the yt-dlp wiki: [Exporting YouTube cookies](https://github.com/yt-dlp/y
 
 For advanced users who need site-specific tweaks or workarounds:
 
-1. **Copy the example configuration:**
+1. **Copy the example configuration** in the repository root, where Docker Compose mounts it from (for a local run, copy it into `service/`):
    ```bash
    cp extractor_config.example.py extractor_config.py
    ```
@@ -312,14 +323,14 @@ The page lists both under Transcripts, with a Show button that displays the Mark
 #### Setup
 
 1. Create an API key at https://aistudio.google.com/apikey, in a Google Cloud project with billing enabled. On the free tier Google may use the audio for training, and its terms allow only paid services for apps that serve users in the EEA.
-2. Copy the example settings and put the key in `GEMINI_API_KEY`:
+2. Copy the example settings in the repository root and put the key in `GEMINI_API_KEY`:
    ```bash
    cp app.env.example app.env
    chmod 600 app.env
    ```
 3. Restart the service: `docker-compose up -d`. Compose reads `app.env` into the app container; without the file the service starts with transcription off, and the Transcribe button is disabled.
 
-For local development, export the variables before you start uvicorn: `set -a; . ./app.env; set +a`.
+For local development, export the variables in `service/` before you start uvicorn: `set -a; . ../app.env; set +a`.
 
 `TRANSCRIPTION_MODEL` selects the model, the default is `gemini-3.5-flash-lite`. `app.env` is gitignored and excluded from the Docker image. The service never logs the key.
 
@@ -425,13 +436,13 @@ A failed transcription has an `error` and one of these `error_code` values:
 
 ### MCP server
 
-The service is also an MCP server, so an agent such as Claude Code can download and transcribe a video on its own. The endpoint is `/mcp` on the same port as the web page, over Streamable HTTP. In production that is `https://video-download.walrus-hops.ts.net/mcp`. To add it to Claude Code:
+The service is also an MCP server, so an agent such as Claude Code can download and transcribe a video on its own. The endpoint is `/mcp` on the same port as the web page, over Streamable HTTP. Behind the Tailscale sidecar that is `https://video-download.your-tailnet-name.ts.net/mcp`. To add it to Claude Code:
 
 ```bash
-claude mcp add --transport http video-download https://video-download.walrus-hops.ts.net/mcp
+claude mcp add --transport http video-download https://video-download.your-tailnet-name.ts.net/mcp
 ```
 
-The endpoint has no authentication and no CSRF token, because the service is reachable only on the tailnet. It checks the `Host` header instead, so a web page cannot reach it through DNS rebinding. It accepts `localhost`, the host of `PUBLIC_BASE_URL`, and the hosts in `MCP_ALLOWED_HOSTS`, a comma-separated list. Any other host gets HTTP 421.
+The endpoint has no authentication and no CSRF token, because the service is reachable only on the tailnet. It checks the `Host` header instead, so a web page cannot reach it through DNS rebinding. It accepts `localhost`, the host of `PUBLIC_BASE_URL`, and the hosts in `MCP_ALLOWED_HOSTS`, a comma-separated list. Any other host gets HTTP 421, so set `PUBLIC_BASE_URL` in `app.env` to the tailnet URL (see `app.env.example`) before you use the endpoint through Tailscale.
 
 Tools:
 
@@ -451,7 +462,7 @@ Resources, one template each:
 - `video-download://jobs/{download_id}/log` - yt-dlp's `download.log`
 - `video-download://jobs/{download_id}/transcripts/{filename}` - a `.transcript.md` (text/markdown) or `.transcript.json` (application/json) of the job
 
-The file URLs point at `GET /downloads/{download_id}/{filename}`, which needs no authentication; anyone on the tailnet with the URL can fetch the file. The service builds them from `PUBLIC_BASE_URL`, which `docker-compose.yml` sets to the tailnet URL. Without it, the URLs use the `X-Forwarded-Proto` and `X-Forwarded-Host` headers of the MCP request, or else its `Host` header.
+The file URLs point at `GET /downloads/{download_id}/{filename}`, which needs no authentication; anyone on the tailnet with the URL can fetch the file. The service builds them from `PUBLIC_BASE_URL`, the tailnet URL of the service, which `app.env` sets. Without it, the URLs use the `X-Forwarded-Proto` and `X-Forwarded-Host` headers of the MCP request, or else its `Host` header.
 
 #### MCP tasks
 
@@ -487,7 +498,7 @@ Set these environment variables to change the defaults:
 ## Directory Structure
 
 ```
-video-download/
+service/
 ├── main.py              # Entrypoint, runs the FastAPI app with uvicorn
 ├── video_download/
 │   ├── web.py           # FastAPI app and routes
@@ -516,7 +527,8 @@ video-download/
 │   └── templates/
 │       └── index.html   # Frontend HTML template
 ├── tests/               # pytest suite
-├── downloads/           # Download directories (created automatically)
+├── Dockerfile           # The production image, built by docker-compose.yml at the repository root
+├── downloads/           # Download directories (created automatically, at the repository root under Docker Compose)
 │   └── {uuid}/
 │       ├── metadata.json    # Download status and video metadata
 │       ├── download.log     # yt-dlp output for this download
