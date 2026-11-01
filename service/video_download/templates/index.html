@@ -92,6 +92,23 @@
             color: #721c24;
             border: 1px solid #f5c6cb;
         }
+        .notice {
+            display: none;
+            margin-top: 20px;
+            padding: 10px 15px;
+            border-radius: 4px;
+            background-color: #e7f1ff;
+            color: #084298;
+            border: 1px solid #b6d4fe;
+        }
+        .notice.shown {
+            display: block;
+        }
+        .notice button {
+            margin: 0 0 0 10px;
+            padding: 4px 12px;
+            font-size: 13px;
+        }
         .metadata {
             margin-top: 15px;
             padding: 15px;
@@ -363,6 +380,7 @@
             <button type="button" id="cancelBtn" class="secondary" style="display: none;">Cancel</button>
         </form>
 
+        <div id="notice" class="notice"></div>
         <div id="status" class="status"></div>
     </div>
 
@@ -372,6 +390,12 @@
         const submitBtn = document.getElementById('submitBtn');
         const cancelBtn = document.getElementById('cancelBtn');
         const urlInput = document.getElementById('url');
+        const noticeDiv = document.getElementById('notice');
+
+        // The form opens /jobs/{id}?existing=1 when the server answered with the earlier job of the same video
+        const isExistingJob = new URLSearchParams(window.location.search || '').get('existing') === '1';
+        // The URL of the shown job, which "Download again" submits
+        let noticeUrl = null;
 
         let pollInterval = null;
 
@@ -753,6 +777,21 @@
             await pollStatus(downloadId);
         }
 
+        function renderNotice(status) {
+            const active = status.status === 'pending' || status.status === 'downloading';
+            if (!isExistingJob || !(active || status.status === 'completed')) {
+                noticeDiv.className = 'notice';
+                noticeDiv.innerHTML = '';
+                return;
+            }
+            const at = active ? status.created_at : (status.completed_at || status.created_at);
+            const when = at ? new Date(at).toLocaleString() : 'an earlier date';
+            const text = active ? `This link is already being downloaded, since ${when}.` : `Already downloaded on ${when}.`;
+            noticeUrl = status.url;
+            noticeDiv.className = 'notice shown';
+            noticeDiv.innerHTML = `${escapeHtml(text)}<button type="button" class="secondary" data-download-again="1">Download again</button>`;
+        }
+
         // The job page is /jobs/{download_id}, the id in the path keeps the reference across reloads and shares
         function jobIdFromPath() {
             const match = window.location.pathname.match(/^\/jobs\/([^/]+)\/?$/);
@@ -780,6 +819,7 @@
                 }
 
                 const status = await response.json();
+                renderNotice(status);
 
                 // Update UI based on status
                 if (status.status === 'pending' || status.status === 'downloading') {
@@ -903,12 +943,8 @@
             }
         }
 
-        form.addEventListener('submit', async (e) => {
-            e.preventDefault();
-
-            const url = urlInput.value.trim();
-            if (!url) return;
-
+        // force downloads the link again even when the server has a job of the same video
+        async function submitDownload(url, force) {
             // On a job page, the poll of the shown job must not overwrite the state of the new submission
             stopPolling();
 
@@ -921,6 +957,7 @@
             try {
                 const formData = new FormData();
                 formData.append('url', url);
+                if (force) formData.append('force', 'true');
 
                 const response = await fetch('/download', {
                     method: 'POST',
@@ -933,9 +970,24 @@
                 }
 
                 const result = await response.json();
-                window.location.assign(`/jobs/${encodeURIComponent(result.download_id)}`);
+                const jobPage = `/jobs/${encodeURIComponent(result.download_id)}`;
+                window.location.assign(result.existing ? `${jobPage}?existing=1` : jobPage);
             } catch (error) {
                 showError(`<strong>Error:</strong> ${escapeHtml(error.message)}`);
+            }
+        }
+
+        form.addEventListener('submit', async (e) => {
+            e.preventDefault();
+
+            const url = urlInput.value.trim();
+            if (!url) return;
+            await submitDownload(url, false);
+        });
+
+        noticeDiv.addEventListener('click', (e) => {
+            if ((e.target.dataset || {}).downloadAgain && noticeUrl) {
+                submitDownload(noticeUrl, true);
             }
         });
 

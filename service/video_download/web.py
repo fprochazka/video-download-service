@@ -12,7 +12,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from pydantic import BaseModel
 from starlette.routing import Route
 
-from video_download import cleanup, config, transcription
+from video_download import cleanup, config, download_index, transcription
 from video_download.csrf import page_token, require_csrf, set_token_cookie
 from video_download.jobs import fail_interrupted_downloads, submit_download
 from video_download.mcp_server import create_server
@@ -36,6 +36,8 @@ TRANSCRIPTION_REJECTED_STATUS = {'not_found': 404, 'not_completed': 409, 'confli
 
 class DownloadInitResponse(BaseModel):
     download_id: str
+    # The job was created earlier for the same video, it runs or has its media; nothing new was queued
+    existing: bool = False
 
 
 @asynccontextmanager
@@ -49,6 +51,7 @@ async def lifespan(fastapi_app: FastAPI):
     config.DOWNLOADS_DIR.mkdir(parents=True, exist_ok=True)
     fail_interrupted_downloads(config.DOWNLOADS_DIR)
     transcription.fail_interrupted_transcriptions(config.DOWNLOADS_DIR)
+    download_index.backfill_index(config.DOWNLOADS_DIR)
 
     worker = JobWorker({DOWNLOAD: config.download_concurrency(), TRANSCRIPTION: config.transcription_concurrency()})
     worker.start()
@@ -132,14 +135,14 @@ async def job_page(request: Request, download_id: uuid.UUID):
 
 
 @app.post('/download', dependencies=[Depends(require_csrf)])
-async def download_video(request: Request, url: str = Form(...)):
-    """Initiate video download and return UUID immediately"""
+async def download_video(request: Request, url: str = Form(...), force: bool = Form(False)):
+    """Start the download and return the job's id at once, or the id of the earlier job of the same video"""
     try:
-        download_id = submit_download(request.app.state.worker, url)
+        submission = submit_download(request.app.state.worker, url, force=force)
     except InvalidDownloadUrl as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
 
-    return DownloadInitResponse(download_id=download_id)
+    return DownloadInitResponse(download_id=submission.download_id, existing=submission.existing)
 
 
 @app.get('/status/{download_id}')

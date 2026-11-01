@@ -21,7 +21,7 @@ const json = (status, body) => ({ ok: status < 300, status, json: async () => bo
 
 global.document = { getElementById: (id) => (elements[id] ||= element(id)) };
 global.window = {
-    location: { pathname: '/', assign: (url) => result.assigned.push(url) },
+    location: { pathname: '/', search: '', assign: (url) => result.assigned.push(url) },
     addEventListener(type, handler) { listeners[`window:${type}`] = handler; },
 };
 global.FormData = class { constructor() { this.entries = []; } append(k, v) { this.entries.push([k, v]); } };
@@ -95,12 +95,29 @@ const EVIL_MEDIA = '"><img src=x onerror=alert(1)>.mp4';
 
 (async () => {
     const jobId = '019a3b2c-4d5e-7f00-8a1b-2c3d4e5f6a7b';
-    if (scenario === 'submit') {
+    if (scenario === 'submit' || scenario === 'submit-existing') {
         eval(source);
         listeners['window:load']();
         elements.url.value = ' https://www.youtube.com/watch?v=dQw4w9WgXcQ ';
-        fetchResponse = json(200, { download_id: jobId });
+        fetchResponse = json(200, { download_id: jobId, existing: scenario === 'submit-existing' });
         await listeners['downloadForm:submit']({ preventDefault() {} });
+    } else if (scenario === 'existing-completed' || scenario === 'existing-downloading' || scenario === 'existing-absent') {
+        window.location.pathname = `/jobs/${jobId}`;
+        window.location.search = scenario === 'existing-absent' ? '' : '?existing=1';
+        const job = scenario === 'existing-downloading' ? downloadingJob(jobId, null) : completedJob(jobId);
+        Object.assign(job, {
+            url: 'https://youtu.be/dQw4w9WgXcQ?si=<b>x</b>', created_at: '2026-10-01T10:00:00+00:00',
+            completed_at: '2026-10-01T10:05:00+00:00',
+        });
+        fetchHandler = (url, method) => (method === 'POST' ? json(200, { download_id: 'new-job', existing: false }) : json(200, job));
+        eval(source);
+        listeners['window:load']();
+        await flush();
+        if (scenario === 'existing-completed') {
+            listeners['notice:click']({ target: { dataset: { downloadAgain: '1' } } });
+            await flush();
+            await flush();
+        }
     } else if (scenario === 'job-page') {
         window.location.pathname = `/jobs/${jobId}`;
         fetchResponse = json(200, { status: 'downloading', download_id: jobId, title: 'Some video' });
@@ -280,6 +297,7 @@ const EVIL_MEDIA = '"><img src=x onerror=alert(1)>.mp4';
     result.progressText = [...html.matchAll(/<small class="progress-text">([^<]*)<\/small>/g)].map((m) => m[1]);
     result.deleted = [...html.matchAll(/<li class="file-deleted">(.*?)<\/li>/g)].map((m) => m[1]);
     result.html = elements.status.innerHTML;
+    result.notice = { className: elements.notice.className, html: elements.notice.innerHTML };
     result.submitDisabled = elements.submitBtn.disabled;
     console.log(JSON.stringify(result));
 })();

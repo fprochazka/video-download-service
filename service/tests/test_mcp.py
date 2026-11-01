@@ -71,7 +71,7 @@ async def test_lists_the_tools_with_their_annotations(downloads_dir, genai):
     assert tools['get_job'].annotations.idempotent_hint is True
     assert tools['download_video'].annotations.read_only_hint is False
     assert tools['transcribe_file'].annotations.read_only_hint is False
-    assert set(tools['download_video'].input_schema['properties']) == {'url'}
+    assert set(tools['download_video'].input_schema['properties']) == {'url', 'force'}
     assert {tool.title for tool in tools.values()} == {
         'Download a video',
         'Get a download job',
@@ -137,7 +137,7 @@ async def test_without_gemini_the_server_offers_no_transcription(downloads_dir):
 
     assert set(tools) == {'download_video', 'get_job'}
     download = tools['download_video']
-    assert set(download.input_schema['properties']) == {'url'}
+    assert set(download.input_schema['properties']) == {'url', 'force'}
     assert download.input_schema['additionalProperties'] is False
     texts = [instructions, download.description, tools['get_job'].description]
     assert not [text for text in texts if 'transcri' in text.lower() or '$' in text]
@@ -162,7 +162,7 @@ async def test_structured_content_matches_the_advertised_output_schema(
         await jobs_done()
         transcribed = await client.call_tool('get_job', {'download_id': download_id})
         FakeYoutubeDL.behaviour = lambda opts, url: raise_like_ytdlp(Exception('Video unavailable'))
-        failing = await client.call_tool('download_video', {'url': VIDEO_URL})
+        failing = await client.call_tool('download_video', {'url': VIDEO_URL, 'force': True})
         await jobs_done()
         failed = await client.call_tool('get_job', {'download_id': failing.structured_content['download_id']})
 

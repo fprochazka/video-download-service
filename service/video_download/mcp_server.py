@@ -43,6 +43,10 @@ VideoUrl = Annotated[
     str,
     Field(description='An http(s) link to the page of ONE video, or of one post'),
 ]
+ForceDownload = Annotated[
+    bool,
+    Field(description='Download again even when the link was already downloaded'),
+]
 DownloadId = Annotated[
     str,
     Field(description='The job id (a UUID) that download_video returned', json_schema_extra={'format': 'uuid'}),
@@ -100,6 +104,8 @@ def download_video_description(transcription: bool) -> str:
             'collections, they are rejected even when they hold one video. A video link that also refers to a playlist '
             'downloads only the video.',
             'A download takes from seconds to several minutes.',
+            'When the same video was already downloaded and its video file is still there, or its download still runs, '
+            'the answer is that job with existing true and nothing is downloaded; force=true downloads it again.',
             'If the answer is a job that has not finished yet, follow it with get_job, using wait_seconds to wait.',
             *(
                 [
@@ -297,6 +303,9 @@ class Job(BaseModel):
     resources: JobResources
     created_at: str
     updated_at: str
+    existing: bool = Field(
+        False, description='download_video found this job of the same video instead of starting a download'
+    )
 
 
 def without_titles(schema):
@@ -320,7 +329,7 @@ def without_titles(schema):
 JOB_SCHEMA = without_titles(Job.model_json_schema())
 
 
-def job_summary(download_dir: Path, metadata: dict, base_url: str | None) -> dict:
+def job_summary(download_dir: Path, metadata: dict, base_url: str | None, existing: bool = False) -> dict:
     """The job as get_job returns it: state, video details, files with URLs, transcriptions with cost, resource URIs"""
     download_id = metadata['download_id']
     status = status_response(download_dir, metadata)
@@ -383,6 +392,7 @@ def job_summary(download_dir: Path, metadata: dict, base_url: str | None) -> dic
         resources=JobResources(metadata=resource_uri(download_id, 'metadata'), log=resource_uri(download_id, 'log')),
         created_at=status.created_at,
         updated_at=status.updated_at,
+        existing=existing,
     )
     return job.model_dump(mode='json')
 
@@ -399,6 +409,11 @@ def summary_text(summary: dict) -> str:
         f'Job {download_id}: {summary["message"]}. {" ".join(d for d in details if d)}'.rstrip(),
         f'Page: {summary["job_url"]}',
     ]
+    if summary['existing']:
+        lines.append(
+            f'The link was already downloaded in this job, created {summary["created_at"]}; nothing new was '
+            'downloaded. Call download_video with force=true to download it again.'
+        )
     if summary['files']:
         lines.append('Files:')
         for file in summary['files']:
@@ -435,8 +450,10 @@ def resource_links(summary: dict) -> list[mcp_types.ResourceLink]:
     return links
 
 
-def job_result(download_dir: Path, metadata: dict, base_url: str | None, is_error: bool = False) -> ToolResult:
-    summary = job_summary(download_dir, metadata, base_url)
+def job_result(
+    download_dir: Path, metadata: dict, base_url: str | None, is_error: bool = False, existing: bool = False
+) -> ToolResult:
+    summary = job_summary(download_dir, metadata, base_url, existing)
     content = [mcp_types.TextContent(text=summary_text(summary)), *resource_links(summary)]
     return ToolResult(content=content, structured_content=summary, is_error=is_error)
 
@@ -488,14 +505,15 @@ def create_server(get_worker: Callable[[], JobWorker], settings: config.Transcri
         output_schema=JOB_SCHEMA,
         annotations=ToolAnnotations(read_only_hint=False, destructive_hint=False, open_world_hint=True),
     )
-    async def download_video(url: VideoUrl) -> ToolResult:
+    async def download_video(url: VideoUrl, force: ForceDownload = False) -> ToolResult:
         try:
-            download_id = jobs.submit_download(get_worker(), url)
+            submission = jobs.submit_download(get_worker(), url, force=force)
         except InvalidDownloadUrl as e:
             raise ToolError(str(e)) from e
-        logger.info('Download %s submitted over MCP', download_id)
-        download_dir = config.DOWNLOADS_DIR / download_id
-        return job_result(download_dir, load_metadata(download_dir), request_base_url())
+        logger.info('Download %s %s over MCP', submission.download_id, 'found' if submission.existing else 'submitted')
+        download_dir = config.DOWNLOADS_DIR / submission.download_id
+        metadata = load_metadata(download_dir)
+        return job_result(download_dir, metadata, request_base_url(), existing=submission.existing)
 
     @server.tool(
         title='Get a download job',

@@ -4,9 +4,10 @@ import asyncio
 import io
 import logging
 import uuid
+from dataclasses import dataclass
 from pathlib import Path
 
-from video_download import config, storage
+from video_download import config, download_index, storage
 from video_download.errors import classify_error, is_needs_auth
 from video_download.progress import DownloadProgress
 from video_download.storage import (
@@ -21,7 +22,7 @@ from video_download.storage import (
     update_metadata,
     write_json,
 )
-from video_download.urls import resolve_download_url
+from video_download.urls import resolve_download_url, video_key
 from video_download.worker import DOWNLOAD, JobWorker
 from video_download.ytdlp import (
     DownloadResult,
@@ -39,8 +40,8 @@ from video_download.ytdlp import (
 logger = logging.getLogger(__name__)
 
 
-def create_job(url: str, download_url: str, extractor: str) -> str:
-    """Create the job directory with a pending metadata.json and return the job's id"""
+def create_job(url: str, download_url: str, extractor: str) -> dict:
+    """Create the job directory with a pending metadata.json and return that metadata"""
     # Time-ordered, so job directories sort by creation; ids of older jobs are UUIDv4
     download_id = str(uuid.uuid7())
     download_dir = config.DOWNLOADS_DIR / download_id
@@ -62,16 +63,36 @@ def create_job(url: str, download_url: str, extractor: str) -> str:
         'updated_at': created_at,
     }
     save_metadata(download_dir, metadata)
-    return download_id
+    return metadata
 
 
-def submit_download(worker: JobWorker, url: str) -> str:
-    """Create the job of the URL and queue its download, return the job's id; raises InvalidDownloadUrl"""
+@dataclass(frozen=True)
+class Submission:
+    download_id: str
+    # The job was created earlier for the same video, nothing new was queued
+    existing: bool
+
+
+def submit_download(worker: JobWorker, url: str, force: bool = False) -> Submission:
+    """Queue the download of the URL in a new job, or return the job of the same video that runs or has its media.
+
+    force always creates a new job. Raises InvalidDownloadUrl.
+    """
     url = url.strip()
     download_url, extractor = resolve_download_url(url)
-    download_id = create_job(url, download_url, extractor)
-    worker.enqueue(DOWNLOAD, download_video_task, download_id, url)
-    return download_id
+    key = video_key(download_url, extractor)
+    with download_index.index_lock:
+        if not force and (existing := download_index.find_existing_job(config.DOWNLOADS_DIR, key)):
+            logger.info('Download of %s is job %s from %s', key, existing['download_id'], existing.get('created_at'))
+            return Submission(existing['download_id'], existing=True)
+        metadata = create_job(url, download_url, extractor)
+        try:
+            download_index.append_entries(config.DOWNLOADS_DIR, [download_index.index_entry(key, metadata)])
+        except OSError:
+            # The job is still valid, the backfill of the next start adds it to the index
+            logger.exception('Could not add job %s to the download index', metadata['download_id'])
+    worker.enqueue(DOWNLOAD, download_video_task, metadata['download_id'], url)
+    return Submission(metadata['download_id'], existing=False)
 
 
 async def download_youtube(

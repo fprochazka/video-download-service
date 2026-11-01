@@ -212,6 +212,17 @@ While the download runs, the job page shows what yt-dlp is downloading: the thum
 
 The job page keeps the form, so you can submit another URL from it. Bookmark or share the job page URL to come back to the download later.
 
+### A link submitted again
+
+The service does not download a video twice. If you submit a link to a video that has a job already, the page opens that job with the note "Already downloaded on <date>" and a "Download again" button, which starts a new job anyway. The earlier job counts when it is `pending` or `downloading`, or when it is `completed` and at least one of its media files is still on disk. A job that failed, or whose media you or the garbage collection deleted, does not count, and the link downloads again as usual. The newest job that counts wins. The state of its transcriptions does not matter.
+
+Two links are the same video when they have the same key, which the service derives from the link alone, without a request to the site:
+
+- `<extractor>:<video id>` when the yt-dlp extractor's URL pattern names the video ID. The key is computed after the playlist parameters are removed, so `youtu.be/X`, `watch?v=X&t=42s`, `m.youtube.com/watch?v=X`, `music.youtube.com/watch?v=X` and `/shorts/X` are all `Youtube:X`, and an Instagram `/p/X`, `/reel/X` and `/reels/X` are all `Instagram:X`.
+- `url:<the link>` otherwise, with a lowercase scheme and host, without the fragment and without the tracking parameters `utm_*`, `fbclid`, `gclid`, `igsh`, `igshid`, `si` and `feature`.
+
+The service finds the jobs of a key in `downloads/.index.jsonl`, one JSON line per created job: `{"key", "download_id", "url", "created_at"}`. The file is only appended to, and each append is fsynced. It only finds candidates: the job's `metadata.json` decides whether the job still counts. On startup the service adds a line for every job directory the index lacks, with the key computed from the job's `download_url` and `extractor`, or from its `url` for jobs that predate those fields. You can delete the file, and the next start rebuilds it from the jobs' metadata. A line cut short by a crash is skipped. The file sits outside every job directory, so no route serves it and the garbage collection never touches it.
+
 ### Privacy & Security
 
 - **No public file listing** - Users can only access downloads if they know the UUID
@@ -489,7 +500,7 @@ The endpoint has no authentication and no CSRF token, because the service is rea
 
 Tools:
 
-- `download_video(url)` - starts a job for a link to one video or one post, with the same URL rules as the web form: a link to a playlist, channel, profile or other collection is a tool error. It never transcribes: downloading and transcribing are always two steps, so the agent reads the subtitles that come free with the download before it pays for a transcript. A client without task support gets the job at once; see [MCP tasks](#mcp-tasks) for the others.
+- `download_video(url, force=false)` - starts a job for a link to one video or one post, with the same URL rules as the web form: a link to a playlist, channel, profile or other collection is a tool error. When the video has a job already (see [A link submitted again](#a-link-submitted-again)), the tool downloads nothing and returns that job with `existing: true`; `force=true` starts a new job anyway. It never transcribes: downloading and transcribing are always two steps, so the agent reads the subtitles that come free with the download before it pays for a transcript. A client without task support gets the job at once; see [MCP tasks](#mcp-tasks) for the others.
 - `get_job(download_id, wait_seconds=0)` - the job's state, the video details (title, duration, uploader, thumbnail and the others of `metadata.json`), the download `progress` while it runs, the error and `error_code` of a failed job, the files with their kind, size and URL, and each transcription with its state, its cost (`cost_estimated` is `false` for an amount the provider reported) and the `provider_report`. With `wait_seconds` (0 to 60) the tool answers once the job changes or ends, so an agent needs fewer calls. A change of the progress alone does not end the wait.
 - `transcribe_file(download_id, filename)` - transcribes one media file of a completed job, with the same rules as the Transcribe button. It replaces an earlier transcript of the file. Its description names the provider and its price, for example `with ElevenLabs Scribe, $0.22 per hour of audio`. The agent is told to prefer the subtitles and to call it when the user asks for a transcript, or when the job has no subtitles or they look broken: truncated, in the wrong language or garbled.
 
@@ -513,6 +524,7 @@ A client that supports the MCP tasks extension (`io.modelcontextprotocol/tasks`,
 
 - The task ID is the job's `download_id`. `tasks/get` reads the job's `metadata.json`, so a task survives a restart of the service. A job the restart interrupted ends its task with `error_code` `interrupted`.
 - While the job runs, the task is `working`, and its `statusMessage` is the job's state, for example `queued`, `downloading 42%`, `downloading 42% (video 1/2)` or `downloading, merging`. The task asks the client to poll every 5 seconds, and its `ttlMs` is null, because the service never deletes a job's metadata.
+- When `download_video` finds an existing job, the task is that job's task: `completed` at once for a completed job, `working` for a job that still downloads.
 - When the job ends, the task is `completed`, with the result that `get_job` returns. The result of a failed job has `isError: true` and the job's `error` and `error_code`. The task status stays `completed` because the extension reserves `failed` for protocol errors.
 - `tasks/cancel` is acknowledged, but it does not stop the job, because yt-dlp and the transcription provider cannot be stopped in the middle of a request. The task's `statusMessage` then says that the job keeps running.
 
@@ -565,6 +577,7 @@ service/
 │   ├── errors.py        # Classification of failures into error codes
 │   ├── urls.py          # URL validation and YouTube playlist stripping
 │   ├── storage.py       # metadata.json of each job
+│   ├── download_index.py # downloads/.index.jsonl, the jobs by video key that find a link submitted again
 │   ├── config.py        # Downloads directory, cookies files, extractor_config.py
 │   ├── static/
 │   │   └── favicon.svg  # Page icon, also served as /favicon.ico
@@ -573,6 +586,7 @@ service/
 ├── tests/               # pytest suite
 ├── Dockerfile           # The production image, built by docker-compose.yml at the repository root
 ├── downloads/           # Download directories (created automatically, at the repository root under Docker Compose)
+│   ├── .index.jsonl     # The jobs by video key, rebuilt from the jobs' metadata.json when missing
 │   └── {uuid}/
 │       ├── metadata.json    # Download status and video metadata
 │       ├── download.log     # yt-dlp output for this download
@@ -592,14 +606,14 @@ service/
 - `GET /jobs/{download_id}` - Web interface for one job, it polls `/status/{download_id}`
   - Accepts any UUID version; 422 for a malformed ID, an unknown ID gets the page with "Download not found"
 - `POST /download` - Initiate download (returns UUID immediately)
-  - Accepts: `url` form parameter
+  - Accepts: `url` form parameter, and `force=true` to download a link that has a job already
   - Requires the CSRF token, see below
-  - Returns: `{"download_id": "uuid"}`
+  - Returns: `{"download_id": "uuid", "existing": false}`; `existing` is `true` when the video has a job already and nothing new was queued, see [A link submitted again](#a-link-submitted-again)
   - Returns HTTP 400 with `{"detail": "..."}` for a non-http(s) URL or a link to a collection (playlist, channel, profile, album), no job is created
 - `GET /status/{download_id}` - Check download status
   - Returns: Status object with download state, files, metadata, errors; 404 for an unknown id, 422 for a malformed one
 - `GET /downloads/{download_id}/{filename}` - Download a specific file
-  - Serves only the files listed in the job's `artifacts`; `metadata.json` and `download.log` are not public
+  - Serves only the files listed in the job's `artifacts`; `metadata.json`, `download.log` and `downloads/.index.jsonl` are not public
 - `DELETE /downloads/{download_id}/{filename}` - Delete one file of the job's `artifacts`, requires the CSRF token
   - Returns the job's status; records the file in `deleted_files`
   - 404 for an unknown job or a file that is not an artifact (including `metadata.json` and `download.log`), 409 while the job is `pending` or `downloading`, or while the file is being transcribed

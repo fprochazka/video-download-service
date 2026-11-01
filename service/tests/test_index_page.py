@@ -49,6 +49,40 @@ def test_submit_opens_the_job_page(page_script):
     assert result['assigned'] == [f'/jobs/{JOB_ID}']
 
 
+def test_submit_of_a_link_already_downloaded_opens_the_earlier_job_with_a_note(page_script):
+    result = run_scenario(page_script, 'submit-existing')
+
+    assert result['assigned'] == [f'/jobs/{JOB_ID}?existing=1']
+
+
+def test_earlier_job_says_when_it_was_downloaded_and_downloads_again_with_force(page_script):
+    result = run_scenario(page_script, 'existing-completed')
+
+    assert result['notice']['className'] == 'notice shown'
+    assert result['notice']['html'].startswith('Already downloaded on ')
+    assert 'data-download-again="1">Download again</button>' in result['notice']['html']
+    assert result['fetches'][-1] == {
+        'url': '/download',
+        'method': 'POST',
+        'body': [['url', 'https://youtu.be/dQw4w9WgXcQ?si=<b>x</b>'], ['force', 'true']],
+        'csrf': 'page-token',
+    }
+    assert result['assigned'] == ['/jobs/new-job']
+
+
+def test_earlier_job_that_still_downloads_says_since_when(page_script):
+    result = run_scenario(page_script, 'existing-downloading')
+
+    assert result['notice']['html'].startswith('This link is already being downloaded, since ')
+    assert result['status']['className'] == 'status loading'
+
+
+def test_job_page_opened_directly_has_no_note(page_script):
+    result = run_scenario(page_script, 'existing-absent')
+
+    assert result['notice'] == {'className': 'notice', 'html': ''}
+
+
 def test_job_page_polls_the_status_of_the_job_in_the_path(page_script):
     result = run_scenario(page_script, 'job-page')
 

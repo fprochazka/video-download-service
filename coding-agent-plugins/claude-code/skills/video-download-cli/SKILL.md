@@ -25,7 +25,7 @@ The CLI reads the service's base URL from `VIDEO_DOWNLOAD_URL` (for example `htt
    ```bash
    video-download download-video --url "https://www.youtube.com/watch?v=..."
    ```
-   The CLI does not support MCP tasks, so the answer is the job at once, usually with `state` `pending`. Note its `download_id`.
+   The CLI does not support MCP tasks, so the answer is the job at once, usually with `state` `pending`. Note its `download_id`. When the video was already downloaded and its file is still there, the answer is that earlier job with `existing` `true`; pass `--force` only when the user wants it downloaded again.
 2. Follow the job until `done` is `true` (`state` `completed` or `failed`). Each call waits up to 60 seconds for a change, so repeat it:
    ```bash
    video-download get-job --download-id <download_id> --wait-seconds 60
