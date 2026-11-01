@@ -33,6 +33,7 @@ from video_download.storage import (
     write_atomic,
 )
 from video_download.subtitles import ORIGINAL_AUTO_SUFFIX, vtt_cues
+from video_download.worker import TRANSCRIPTION, JobWorker
 
 logger = logging.getLogger(__name__)
 
@@ -445,6 +446,39 @@ def request_transcription(download_dir: Path, media_name: str, model: str) -> di
             'files': current.get('files') or [],
         }
         return update_metadata(download_dir, transcriptions=transcriptions)
+
+
+class TranscriptionRejected(Exception):
+    """A transcription the job cannot have now; reason is not_found, not_completed, not_configured or conflict"""
+
+    def __init__(self, reason: str, message: str):
+        super().__init__(message)
+        self.reason = reason
+        self.message = message
+
+
+def submit_transcription(worker: JobWorker, download_id: str, media_name: str) -> dict:
+    """Record a pending transcription of a media file of a completed job and queue it; returns the job's metadata"""
+    download_dir = config.DOWNLOADS_DIR / download_id
+    metadata = load_metadata(download_dir)
+    if not metadata or media_name not in media_artifact_names(download_dir, metadata):
+        raise TranscriptionRejected('not_found', 'File not found')
+    path = (download_dir / media_name).resolve()
+    if path.parent != download_dir.resolve() or not path.is_file():
+        raise TranscriptionRejected('not_found', 'File not found')
+    if metadata.get('status') != 'completed':
+        raise TranscriptionRejected('not_completed', 'The download has not completed, transcribe it after it does.')
+    settings = config.transcription_settings()
+    if not settings.available:
+        raise TranscriptionRejected('not_configured', ERROR_MESSAGES['not_configured'])
+    try:
+        metadata = request_transcription(download_dir, media_name, settings.model)
+    except TranscriptionConflict:
+        raise TranscriptionRejected('conflict', 'This file is already being transcribed.') from None
+
+    worker.enqueue(TRANSCRIPTION, transcribe_media_task, download_id, media_name)
+    logger.info('Download %s: transcription of %s queued', download_id, media_name)
+    return metadata
 
 
 def store_result(download_dir: Path, media_name: str, files: list[str], **fields) -> dict:

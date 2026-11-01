@@ -13,10 +13,10 @@ from pydantic import BaseModel
 
 from video_download import cleanup, config, transcription
 from video_download.csrf import page_token, require_csrf, set_token_cookie
-from video_download.jobs import create_job, download_video_task, fail_interrupted_downloads
+from video_download.jobs import fail_interrupted_downloads, submit_download
 from video_download.status import status_response
 from video_download.storage import ACTIVE_STATUSES, job_artifacts, load_metadata, remove_artifacts
-from video_download.urls import InvalidDownloadUrl, resolve_download_url
+from video_download.urls import InvalidDownloadUrl
 from video_download.worker import DOWNLOAD, TRANSCRIPTION, JobWorker
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -27,6 +27,8 @@ TEMPLATES_DIR = Path(__file__).parent / 'templates'
 FAVICON_FILE = Path(__file__).parent / 'static' / 'favicon.svg'
 
 logger = logging.getLogger(__name__)
+
+TRANSCRIPTION_REJECTED_STATUS = {'not_found': 404, 'not_completed': 409, 'conflict': 409}
 
 
 class DownloadInitResponse(BaseModel):
@@ -94,14 +96,10 @@ async def job_page(request: Request, download_id: uuid.UUID):
 @app.post('/download', dependencies=[Depends(require_csrf)])
 async def download_video(request: Request, url: str = Form(...)):
     """Initiate video download and return UUID immediately"""
-    url = url.strip()
     try:
-        download_url, extractor = resolve_download_url(url)
+        download_id = submit_download(request.app.state.worker, url)
     except InvalidDownloadUrl as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
-
-    download_id = create_job(url, download_url, extractor)
-    request.app.state.worker.enqueue(DOWNLOAD, download_video_task, download_id, url)
 
     return DownloadInitResponse(download_id=download_id)
 
@@ -156,26 +154,11 @@ async def delete_download_file(download_id: uuid.UUID, filename: str):
 @app.post('/downloads/{download_id}/{filename}/transcribe', status_code=202, dependencies=[Depends(require_csrf)])
 async def transcribe_file(request: Request, download_id: uuid.UUID, filename: str):
     """Queue a transcription of one media file of a completed job; returns the job's status"""
-    download_dir = config.DOWNLOADS_DIR / str(download_id)
-    metadata = load_metadata(download_dir)
-    if not metadata or filename not in transcription.media_artifact_names(download_dir, metadata):
-        raise HTTPException(status_code=404, detail='File not found')
-    path = (download_dir / filename).resolve()
-    if path.parent != download_dir.resolve() or not path.is_file():
-        raise HTTPException(status_code=404, detail='File not found')
-    if metadata.get('status') != 'completed':
-        raise HTTPException(status_code=409, detail='The download has not completed, transcribe it after it does.')
-    settings = config.transcription_settings()
-    if not settings.available:
-        return JSONResponse(
-            status_code=503,
-            content={'detail': transcription.ERROR_MESSAGES['not_configured'], 'error_code': 'not_configured'},
-        )
     try:
-        metadata = transcription.request_transcription(download_dir, filename, settings.model)
-    except transcription.TranscriptionConflict:
-        raise HTTPException(status_code=409, detail='This file is already being transcribed.') from None
+        metadata = transcription.submit_transcription(request.app.state.worker, str(download_id), filename)
+    except transcription.TranscriptionRejected as e:
+        if e.reason == 'not_configured':
+            return JSONResponse(status_code=503, content={'detail': e.message, 'error_code': 'not_configured'})
+        raise HTTPException(status_code=TRANSCRIPTION_REJECTED_STATUS[e.reason], detail=e.message) from None
 
-    request.app.state.worker.enqueue(TRANSCRIPTION, transcription.transcribe_media_task, str(download_id), filename)
-    logger.info('Download %s: transcription of %s queued', download_id, filename)
-    return status_response(download_dir, metadata)
+    return status_response(config.DOWNLOADS_DIR / str(download_id), metadata)

@@ -20,6 +20,8 @@ from video_download.storage import (
     update_metadata,
     write_json,
 )
+from video_download.urls import resolve_download_url
+from video_download.worker import DOWNLOAD, JobWorker
 from video_download.ytdlp import (
     DownloadResult,
     build_ydl_opts,
@@ -59,6 +61,15 @@ def create_job(url: str, download_url: str, extractor: str) -> str:
         'updated_at': created_at,
     }
     save_metadata(download_dir, metadata)
+    return download_id
+
+
+def submit_download(worker: JobWorker, url: str) -> str:
+    """Create the job of the URL and queue its download, return the job's id; raises InvalidDownloadUrl"""
+    url = url.strip()
+    download_url, extractor = resolve_download_url(url)
+    download_id = create_job(url, download_url, extractor)
+    worker.enqueue(DOWNLOAD, download_video_task, download_id, url)
     return download_id
 
 
