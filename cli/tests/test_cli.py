@@ -66,7 +66,7 @@ def test_a_missing_url_names_the_variable_without_contacting_the_service() -> No
 
 
 def test_a_missing_url_fails_a_command_with_a_config_error() -> None:
-    code, _, stderr = invoke("get-job", "--download-id", "01a1968d-3dc0-725e-b64f-b7790a0de14a")
+    code, _, stderr = invoke("get-job", "--download-id", "01890000-0000-7000-8000-000000000001")
 
     assert code == 2
     assert "VIDEO_DOWNLOAD_URL" in stderr

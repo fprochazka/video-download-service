@@ -1,0 +1,6 @@
+# The service's style; the scripts run with its environment
+extend = "../service/pyproject.toml"
+
+[lint.isort]
+# Importing metrics puts the service on the import path, so it has to come before any video_download import
+known-first-party = ["metrics", "video_download"]

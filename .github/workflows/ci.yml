@@ -29,6 +29,12 @@ jobs:
       - name: Ruff format check
         run: uv run ruff format --check .
 
+      # The benchmark scripts run with the service's environment and follow its style
+      - name: Ruff check of the benchmarks
+        run: |
+          uv run ruff check --output-format github ../benchmarks
+          uv run ruff format --check ../benchmarks
+
   test:
     name: Test (Python ${{ matrix.python-version }})
     runs-on: ubuntu-latest
@@ -57,6 +63,9 @@ jobs:
       # The runner has Node.js, so the page script tests run here instead of being skipped
       - name: Run tests
         run: uv run pytest
+
+      - name: Run the tests of the benchmark measures
+        run: uv run pytest ../benchmarks
 
   cli:
     name: CLI (Python ${{ matrix.python-version }})

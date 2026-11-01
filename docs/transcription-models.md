@@ -8,6 +8,8 @@ Which Gemini model and request shape transcribe best, measured on our own record
 
 The captions serve as ground truth. They are YouTube's own speech recognition, so they are good but not perfect: a few percent of "missed" words are caption or spelling differences.
 
+[benchmark-methodology.md](benchmark-methodology.md) defines each measure below and has the scripts that reproduce them.
+
 ## Decision
 
 `gemini-3.5-flash-lite`, plain-text output, no response schema. It is the cheapest model, about $0.12–0.15 per hour of audio, and no other model covered more of the speech. Bigger models only keep timestamps tighter.

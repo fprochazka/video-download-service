@@ -13,7 +13,7 @@ To give Claude Code the skill, install the plugin, then install the CLI as descr
 /plugin install video-download-cli --marketplace fprochazka/video-download-service
 ```
 
-`docs/` has the measured results of the transcription experiments and the research behind the design: [models](docs/transcription-models.md), [chunking](docs/transcription-chunking.md) and [research notes](docs/research.md).
+`docs/` has the measured results of the transcription experiments and the research behind the design: [models](docs/transcription-models.md), [chunking](docs/transcription-chunking.md) and [research notes](docs/research.md). [The benchmark methodology](docs/benchmark-methodology.md) describes how they were measured, with the scripts in `benchmarks/` that reproduce them and score new providers.
 
 ## Deployment
 

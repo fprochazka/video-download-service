@@ -1,6 +1,6 @@
 # Transcription chunking: what we measured
 
-How long recordings are cut into chunks for Gemini, and which ideas helped or hurt. The test recordings and the ground truth are described in [transcription-models.md](transcription-models.md). Every experiment ran on `gemini-3.5-flash-lite` with plain-text output, and most ran once per variant, so a difference of a few words is within the run-to-run variance.
+How long recordings are cut into chunks for Gemini, and which ideas helped or hurt. The test recordings and the ground truth are described in [transcription-models.md](transcription-models.md). Every experiment ran on `gemini-3.5-flash-lite` with plain-text output, and most ran once per variant, so a difference of a few words is within the run-to-run variance. [benchmark-methodology.md](benchmark-methodology.md) defines each measure and has the scripts that reproduce them.
 
 ## Current design
 
