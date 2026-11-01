@@ -69,6 +69,24 @@ One request per recording, no chunking: `scribe_v2` with speaker labels, word ti
 - Audio events come in the recording's language: `[laughs]`, `[gentle music]`, `[smích]`, `[hudba]`.
 - The service offers Scribe as its second provider, `TRANSCRIPTION_PROVIDER=elevenlabs`. Its Markdown puts the short interjections between two long turns of the other speaker in parentheses (96 of the English interview's turns) and writes English numbers in digits; Czech numbers stay words, see [the service README](../service/README.md#elevenlabs-scribe).
 
+## Gemini 3.5 Transcribe on whole recordings
+
+`gemini-3.5-transcribe` is called through the Interactions API (`client.interactions.create` with a `transcription_config`), not `generateContent`. Verbatim mode with speaker labels (`spk:N`, up to 8) and word timestamps; "smart" mode cleans up disfluencies but rules out both. A request takes up to 1 hour of audio, but only 30 minutes with speaker labels or timestamps, so both recordings were cut into 22–25 minute parts at the longest pause near equal splits; speaker labels restart in each part. Custom vocabulary cannot be combined with speaker labels or timestamps. Price $2 per million audio tokens (25 per second) and $12 per million output tokens; the response reports tokens, no money.
+
+| Measure | English long: Flash-Lite / Scribe / Transcribe | Czech: Flash-Lite / Scribe / Transcribe |
+|---|---|---|
+| Caption words covered, normalized | 97.9% / 97.8% / 97.3% | 95.5% / 93.6% / 91.1% |
+| Text not in the captions | 2.9% / 5.1% / 4.0% | 5.4% / 8.0% / 12.0% |
+| Timestamp drift, median / max | 1.8 / 16.6 s; 0.11 / 0.6 s; 0.08 / 0.2 s | 2.9 / 28.3 s; 0.03 / 1.0 s; 0.04 / 0.7 s |
+| Speaker changes matching the captions, precision / recall | 0.63 / 0.82; 0.52 / 0.93; 0.79 / 0.82 | 0.60 / 0.78; 0.54 / 0.87; 0.64 / 0.86 |
+| Cost | $0.19 / ~$0.34 / $0.56 | $0.15 / ~$0.23 / $0.47 |
+
+- In English it is slightly better than Scribe: fewer insertions, tighter timestamps, more precise speaker changes, numbers as digits, and "going to" instead of "gonna". It dropped one 8-word line.
+- In Czech it is the weakest of the three: it standardizes colloquial forms ("kterej" kept 9 times of 25, "lidi" became "lidé" 24 times), splits words ("Tak že", "ne vím"), inserts English "uh" 17 times and garbles some phrases. It got a few phrases right that the others did not ("proti předchozímu šéfovi Fedu", "na Rujánu").
+- A few words get timestamps about 1000 s off, apparently digit errors, and backchannels in overlapping speech come out of time order. The service would need a monotonicity check and a sort.
+- The host kept one label across all English parts; in Czech the labels changed between parts and one part had five speakers for two people.
+- It costs about 1.6× Scribe and 3× Flash-Lite, and needs splitting at 30 minutes. Scribe stays the production provider.
+
 ## Gotchas of the Gemini API
 
 - **Billing counts 25 audio tokens per second.** `countTokens` reports 32 per second, a leftover of the Gemini 2.x formula, so never use it to estimate cost. The usage metadata of the answer is what is billed.
