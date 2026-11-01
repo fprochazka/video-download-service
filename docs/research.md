@@ -32,6 +32,22 @@ The service is meant to run on modest hardware: a few CPU cores, no GPU, possibl
 
 Google has not documented it. A leaked system prompt of YouTube's "Ask" assistant gives the model a timestamped transcript, and users have reported "no transcript, no summary" since 2024, so captions look like the default source. Google announced "agentic video" on 2026-09-01: it searches the transcript first and loads frames and audio only where needed. It is live in the API and was "rolling out soon" to the app. The Gemini API processes a YouTube URL natively, sampling frames once per second plus the audio.
 
+## Live meeting transcription, an approach seen in a different project (checked 2026-11-01)
+
+A meeting notetaker built a different way solves the problems this service has with long recordings by not having them:
+
+- A bot from a meeting-recording service joins the video call (Google Meet, Zoom, Teams) and streams the audio live to a streaming speech-to-text service. The notetaker itself has no audio processing, no chunking, no VAD and no prompts; it downloads the finished transcript after the call.
+- Speaker names come from the meeting platform's participant data, so they are correct and stay the same across the whole call. There is no speaker-label problem to solve.
+- A streaming recognizer works on short audio frames and decides by itself where an utterance ends, in one continuous session. There are no seams where words can get lost.
+- The hard case was speech that switches between Czech and English mid-sentence. A multilingual mode without Czech in its code-switching set turned that speech into Russian, Portuguese and Italian; a service with real-time code-switching across the expected languages fixed it.
+
+The approach works only because the audio arrives live from a meeting, and it leaves the hard parts to two paid services. Published prices of the services involved, pay as you go:
+
+- **Recall.ai** (meeting bots): $0.50 per hour of recording, transcription extra; its own transcription costs $0.15 per hour. https://www.recall.ai/pricing
+- **Gladia** (speech-to-text): real time from EUR 0.68 per hour; asynchronous from EUR 0.16 per hour (Solaria-3, 6 languages) or EUR 0.27 (Solaria-1, 100+ languages). Code-switching is supported in live sessions. https://www.gladia.io/pricing
+- **Deepgram** (speech-to-text): Nova-3 multilingual about $0.55 per hour streaming and $0.31 pre-recorded. Its code-switching language list does not include Czech, although Czech is supported on its own. https://deepgram.com/pricing
+- **Speechmatics** (speech-to-text): real time $0.40–0.80 per hour depending on the model, batch $0.24–0.75. Code-switching only on the Melia 1 and Oak 1 models. https://www.speechmatics.com/pricing
+
 ## Using a YouTube account with yt-dlp (checked 2026-10-31)
 
 - Cookies are the only way to log in; yt-dlp removed OAuth in 2024. Export them from a private browser window that you then close, because YouTube replaces the cookies of a session that stays open.
