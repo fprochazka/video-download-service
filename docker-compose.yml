@@ -21,6 +21,8 @@ services:
         required: false
     environment:
       - PYTHONUNBUFFERED=1
+      # The URL the MCP tools put in front of the file links, and the Host the /mcp endpoint accepts
+      - PUBLIC_BASE_URL=${PUBLIC_BASE_URL:-https://video-download.walrus-hops.ts.net}
 
   ts-video-download:
     image: tailscale/tailscale:latest

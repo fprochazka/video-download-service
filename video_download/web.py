@@ -10,10 +10,12 @@ from pathlib import Path
 from fastapi import Depends, FastAPI, Form, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from pydantic import BaseModel
+from starlette.routing import Route
 
 from video_download import cleanup, config, transcription
 from video_download.csrf import page_token, require_csrf, set_token_cookie
 from video_download.jobs import fail_interrupted_downloads, submit_download
+from video_download.mcp_server import create_server
 from video_download.status import status_response
 from video_download.storage import ACTIVE_STATUSES, job_artifacts, load_metadata, remove_artifacts
 from video_download.urls import InvalidDownloadUrl
@@ -51,7 +53,8 @@ async def lifespan(fastapi_app: FastAPI):
         gc_task = asyncio.create_task(cleanup.run_periodically(config.DOWNLOADS_DIR, gc_settings))
     else:
         logger.info('GC is disabled')
-    yield
+    async with mcp_app.lifespan(mcp_app):
+        yield
     if gc_task is not None:
         gc_task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
@@ -59,7 +62,20 @@ async def lifespan(fastapi_app: FastAPI):
     await worker.stop()
 
 
+mcp_server = create_server(lambda: app.state.worker)
+# Stateless: each MCP request stands on its own and every tool reads the job from disk, so no session outlives a restart.
+# The Host guard keeps a page on another site from reaching the endpoint through DNS rebinding; there is no auth or
+# CSRF token on /mcp, the service is only reachable on the tailnet
+mcp_app = mcp_server.http_app(
+    path='/mcp',
+    stateless_http=True,
+    host_origin_protection=True,
+    allowed_hosts=config.mcp_allowed_hosts(),
+)
+
 app = FastAPI(title='Video Download Service', lifespan=lifespan)
+# A route and not a mount, so /mcp itself is the endpoint and not a redirect to /mcp/; the MCP app routes it again
+app.router.routes.append(Route('/mcp', endpoint=mcp_app))
 
 
 def index_page(request: Request) -> HTMLResponse:

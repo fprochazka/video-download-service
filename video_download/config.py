@@ -4,6 +4,7 @@ import os
 from dataclasses import dataclass, field
 from datetime import timedelta
 from pathlib import Path
+from urllib.parse import urlsplit
 
 DOWNLOADS_DIR = Path(os.environ.get('DOWNLOADS_DIR', 'downloads'))
 
@@ -33,6 +34,21 @@ def load_user_config() -> tuple[dict, dict]:
 def env_int(name: str, default: int) -> int:
     value = os.environ.get(name)
     return int(value) if value and value.strip() else default
+
+
+def public_base_url() -> str | None:
+    """The URL the service is reached at, e.g. https://video-download.example.ts.net, for absolute links to job files"""
+    value = (os.environ.get('PUBLIC_BASE_URL') or '').strip().rstrip('/')
+    return value or None
+
+
+def mcp_allowed_hosts() -> list[str]:
+    """Host headers the MCP endpoint accepts besides localhost: the host of PUBLIC_BASE_URL and MCP_ALLOWED_HOSTS"""
+    hosts = [host.strip() for host in (os.environ.get('MCP_ALLOWED_HOSTS') or '').split(',') if host.strip()]
+    base_url = public_base_url()
+    if base_url and (hostname := urlsplit(base_url).hostname):
+        hosts.insert(0, hostname)
+    return hosts
 
 
 def download_concurrency() -> int:

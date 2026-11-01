@@ -22,6 +22,7 @@ A simple web service for downloading videos from various platforms using yt-dlp 
   - `completed` - At least one media file was downloaded
   - `failed` - Error occurred, or yt-dlp finished without a media file (details in `error`, `error_code`, `error_type`)
 - **Transcription** - A Transcribe button on each media file sends its audio to Google Gemini and adds a Markdown and a JSON transcript with timestamps and speaker labels to the job, see [Transcription](#transcription)
+- **MCP server** - Agents such as Claude Code download and transcribe videos through the `/mcp` endpoint, see [MCP server](#mcp-server)
 - **Cleanup of old media** - Media files over 5 MB are deleted 90 days after their job finished, the job page and its subtitles and details stay, see [Garbage collection](#garbage-collection)
 - **Restart safety** - Downloads that were running when the service stopped are marked `failed` with `error_code` `interrupted` on the next start
 
@@ -376,6 +377,32 @@ A failed transcription has an `error` and one of these `error_code` values:
 - `interrupted` - the service restarted while the transcription was queued or running
 - `unknown` - anything else
 
+### MCP server
+
+The service is also an MCP server, so an agent such as Claude Code can download and transcribe a video on its own. The endpoint is `/mcp` on the same port as the web page, over Streamable HTTP. In production that is `https://video-download.walrus-hops.ts.net/mcp`. To add it to Claude Code:
+
+```bash
+claude mcp add --transport http video-download https://video-download.walrus-hops.ts.net/mcp
+```
+
+The endpoint has no authentication and no CSRF token, because the service is reachable only on the tailnet. It checks the `Host` header instead, so a web page cannot reach it through DNS rebinding. It accepts `localhost`, the host of `PUBLIC_BASE_URL`, and the hosts in `MCP_ALLOWED_HOSTS`, a comma-separated list. Any other host gets HTTP 421.
+
+Tools:
+
+- `download_video(url, transcribe=false)` - starts a job for the URL, with the same URL rules as the web form: a YouTube link to a playlist or a channel is a tool error. With `transcribe` set, the service transcribes every media file of the job once the download completes. Without `GEMINI_API_KEY` the download still completes, and the job's transcription is `failed` with `not_configured`. The tool answers at once with the job and does not wait for the download.
+- `get_job(download_id, wait_seconds=0)` - the job's state, the video's title, duration and uploader, the error and `error_code` of a failed job, the files with their kind, size and URL, and each transcription with its state and estimated cost. With `wait_seconds` (at most 60) the tool answers once the job changes or ends, so an agent needs fewer calls.
+- `transcribe_file(download_id, filename)` - transcribes one media file of a completed job, with the same rules as the Transcribe button.
+
+A job's `state` is `pending`, `downloading`, `transcribing` (the download completed and a transcription of the job is queued or running), `completed` or `failed`. A tool result has the job as structured content, and a short text with the file URLs. Each file with an absolute URL is also a `resource_link`.
+
+Resources, one template each:
+
+- `video-download://jobs/{download_id}/metadata` - the job's `metadata.json`
+- `video-download://jobs/{download_id}/log` - yt-dlp's `download.log`
+- `video-download://jobs/{download_id}/transcripts/{filename}` - a `.transcript.md` (text/markdown) or `.transcript.json` (application/json) of the job
+
+The file URLs point at `GET /downloads/{download_id}/{filename}`, which needs no authentication; anyone on the tailnet with the URL can fetch the file. The service builds them from `PUBLIC_BASE_URL`, which `docker-compose.yml` sets to the tailnet URL. Without it, the URLs use the `X-Forwarded-Proto` and `X-Forwarded-Host` headers of the MCP request, or else its `Host` header.
+
 ### Garbage collection
 
 The service deletes large media of old jobs, so the downloads directory does not grow forever. It runs once in the background a moment after startup, then every `GC_INTERVAL_HOURS`.
@@ -405,6 +432,8 @@ video-download/
 ├── main.py              # Entrypoint, runs the FastAPI app with uvicorn
 ├── video_download/
 │   ├── web.py           # FastAPI app and routes
+│   ├── mcp_server.py    # The MCP server at /mcp: tools and resources
+│   ├── status.py        # The job status the API and the MCP tools return
 │   ├── jobs.py          # Job creation, the download task, the startup sweep
 │   ├── worker.py        # In-process job queues with a concurrency limit per lane
 │   ├── transcription.py # Transcription pipeline: prompt, answer parsing, checks, transcript files
@@ -460,6 +489,8 @@ video-download/
   - Returns HTTP 202 with the job's status, the file's entry in `transcriptions` is `pending`
   - 404 for an unknown job or a file that is not a media artifact, 409 when the job is not `completed` or the file already has a transcription `pending` or `running`, 503 with `{"detail": "...", "error_code": "not_configured"}` without `GEMINI_API_KEY`
 
+- `POST /mcp` - The MCP server, see [MCP server](#mcp-server); no CSRF token
+
 ### CSRF protection
 
 Requests that change state need the `X-CSRF-Token` header with the token the page embeds in its `csrf-token` meta tag. The page response also sets that token in the `csrf_token` cookie (HttpOnly, SameSite=Strict, Secure over https), and the server compares the two. Requests with a `Sec-Fetch-Site` other than `same-origin` or `none`, or an `Origin` that differs from the `Host`, are rejected as well. A rejected request gets HTTP 403 with `{"detail": "..."}`. To call the API from a script, first `GET /`, then send the cookie and the token from the page.
@@ -474,6 +505,7 @@ Each download creates a `metadata.json` file with:
   "url": "original_url",
   "download_url": "url_passed_to_yt_dlp",
   "extractor": "Youtube",
+  "auto_transcribe": false,
   "status": "completed|downloading|pending|failed",
   "files": ["Video_Title-dQw4w9WgXcQ.mp4"],
   "artifacts": [

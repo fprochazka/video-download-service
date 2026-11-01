@@ -6,7 +6,7 @@ import logging
 import uuid
 from pathlib import Path
 
-from video_download import config, storage
+from video_download import config, storage, transcription
 from video_download.errors import classify_error, is_needs_auth
 from video_download.storage import (
     ACTIVE_STATUSES,
@@ -21,7 +21,7 @@ from video_download.storage import (
     write_json,
 )
 from video_download.urls import resolve_download_url
-from video_download.worker import DOWNLOAD, JobWorker
+from video_download.worker import DOWNLOAD, TRANSCRIPTION, JobWorker
 from video_download.ytdlp import (
     DownloadResult,
     build_ydl_opts,
@@ -38,7 +38,7 @@ from video_download.ytdlp import (
 logger = logging.getLogger(__name__)
 
 
-def create_job(url: str, download_url: str, extractor: str) -> str:
+def create_job(url: str, download_url: str, extractor: str, auto_transcribe: bool = False) -> str:
     """Create the job directory with a pending metadata.json and return the job's id"""
     # Time-ordered, so job directories sort by creation; ids of older jobs are UUIDv4
     download_id = str(uuid.uuid7())
@@ -51,6 +51,8 @@ def create_job(url: str, download_url: str, extractor: str) -> str:
         'url': url,
         'download_url': download_url,
         'extractor': extractor,
+        # Every media file is transcribed once the download completes
+        'auto_transcribe': auto_transcribe,
         'status': 'pending',
         'files': [],
         'artifacts': [],
@@ -64,12 +66,12 @@ def create_job(url: str, download_url: str, extractor: str) -> str:
     return download_id
 
 
-def submit_download(worker: JobWorker, url: str) -> str:
+def submit_download(worker: JobWorker, url: str, auto_transcribe: bool = False) -> str:
     """Create the job of the URL and queue its download, return the job's id; raises InvalidDownloadUrl"""
     url = url.strip()
     download_url, extractor = resolve_download_url(url)
-    download_id = create_job(url, download_url, extractor)
-    worker.enqueue(DOWNLOAD, download_video_task, download_id, url)
+    download_id = create_job(url, download_url, extractor, auto_transcribe)
+    worker.enqueue(DOWNLOAD, download_video_task, download_id, url, worker)
     return download_id
 
 
@@ -131,8 +133,8 @@ def mark_failed(download_dir: Path, download_id: str, error: dict, extractor: st
         logger.exception('Could not store the failure of download %s', download_id)
 
 
-async def download_video_task(download_id: str, url: str):
-    """Background task to download video"""
+async def download_video_task(download_id: str, url: str, worker: JobWorker | None = None):
+    """Background task to download video; with the worker it queues the transcriptions of an auto_transcribe job"""
     download_dir = config.DOWNLOADS_DIR / download_id
     extractor = None
 
@@ -151,6 +153,11 @@ async def download_video_task(download_id: str, url: str):
         files = collect_downloaded_files(result.media_filepaths, download_dir)
         video_metadata = extract_video_metadata(result.info) if result.info else {}
         if files:
+            # Pending before the job is completed, so nobody sees a completed job that is still going to be transcribed
+            auto_transcribed = files if worker is not None and metadata.get('auto_transcribe') else []
+            model = config.transcription_settings().model
+            for name in auto_transcribed:
+                transcription.request_transcription(download_dir, name, model)
             artifacts = [artifact(download_dir, name, MEDIA) for name in files]
             artifacts += subtitle_artifacts(download_dir, result)
             if write_info_file(download_id, download_dir, result):
@@ -169,6 +176,9 @@ async def download_video_task(download_id: str, url: str):
                 **video_metadata,
             )
             logger.info('Download %s completed: extractor=%s files=%s', download_id, extractor, files)
+            for name in auto_transcribed:
+                # Without GEMINI_API_KEY the transcription fails as not_configured, which tells the user why
+                worker.enqueue(TRANSCRIPTION, transcription.transcribe_media_task, download_id, name)
         else:
             update_metadata(download_dir, **video_metadata)
             error = {
