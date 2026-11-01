@@ -85,3 +85,23 @@ The pipeline handles Czech: on the Czech recording it covered 95.5% of the capti
 - English loanwords come out phonetically: "fiat svět, jeden velkej skam" for "fiat world, one big scam".
 - Lines are long, 105 characters on average and up to 527.
 - One chunk looped on a paraphrased sentence until the output limit and needed a retry.
+
+## Local speaker diarization with pyannote
+
+`pyannote/speaker-diarization-community-1` with pyannote.audio 4.0.7 on CPU (PyTorch 2.15, Python 3.14), on the English long recording. It would give globally consistent speaker labels for the Gemini path, which restarts labels in every chunk.
+
+| Where | Real-time factor | 91.5 min recording |
+|---|---|---|
+| Consumer GPU from 2016, 6 GB, CUDA 12.6 build | 0.054 | 4.9 min, measured |
+| 8 desktop cores with AVX-512 | 0.57 | 52 min, measured |
+| 2 cores without AVX2, emulated | 1.94 | about 3 h, extrapolated; an older 2-core laptop CPU is another 1.5–2× slower |
+| Cloud Run 8 vCPU, estimated | 0.6–0.8 | about 1–1.2 h |
+| Cloud Run 4 vCPU, estimated | 1.2–1.5 | about 1.8–2.3 h |
+
+- The speaker embeddings take 95% of the time: pyannote runs a ResNet up to three times for every 10 s window, with a 1 s step. Segmentation and clustering are about 3%.
+- Footprint: a 1.4 GB Python environment (PyTorch alone 0.75 GB), a 32 MB model, 2.4–2.8 GB RAM. torchcodec does not load on Python 3.14, so the audio has to be decoded with ffmpeg and passed in memory.
+- To emulate a CPU without AVX2, `ATEN_CPU_CAPABILITY=default` is not enough: oneDNN and MKL pick their own instruction sets and need `ONEDNN_MAX_CPU_ISA=AVX` and `MKL_ENABLE_INSTRUCTIONS=AVX`.
+- Quality is good: host and guest keep one label across the whole file, including the intro montage. It added a third cluster of 48 s, mostly backchannels, and misassigned one 22 s stretch. 66% of the captions' `>>` speaker changes have a pyannote change within 1 s, and 78% the other way round.
+- On the GPU the result is byte-identical to the CPU run, the embeddings run 11× faster, and the card uses about 2.2 GB at the default batch size of 32. A batch of 64 was slower and 128 ran out of memory on 6 GB. The CUDA build makes the Python environment 6.7 GB instead of 1.4 GB. Current PyTorch CUDA 12.8+ builds may lack kernels for this older GPU generation; the CUDA 12.6 build includes them.
+- A cloud GPU would make it cheap: on Cloud Run with an NVIDIA L4 (estimated 3–5× the measured GPU, $1.05 per hour for the instance) diarization would cost roughly $0.02–0.04 per hour of audio, including a 30–60 s cold start for a 7 GB image. This is an estimate, not a measurement.
+- Decision: not pursued. Without a GPU it is too slow for transcripts expected within minutes, and a GPU means a second deployment. ElevenLabs Scribe already returns consistent speaker labels for the whole file in one request.
