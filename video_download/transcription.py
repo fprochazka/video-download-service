@@ -831,20 +831,37 @@ def answer_problems(
     return problems
 
 
-def repair_timestamps(transcript: ChunkTranscript, duration: float) -> tuple[ChunkTranscript, int, int] | None:
-    """The transcript with its timestamps moved back when all of them are whole minutes late, and with its few
-    out-of-line timestamps moved between their neighbours, how many moved and by how many minutes all moved; None when
-    too many are out of line, the checks then reject the answer. See chunking.minutes_late and chunking.repair_times."""
+@dataclass
+class TimestampRepair:
+    # How many single timestamps moved between their neighbours
+    moved: int = 0
+    # By how many whole minutes every timestamp moved back
+    minutes_late: int = 0
+    # By how many whole minutes the lines after a forward jump moved back
+    jump_minutes: int = 0
+
+
+def repair_timestamps(transcript: ChunkTranscript, duration: float) -> tuple[ChunkTranscript, TimestampRepair] | None:
+    """The transcript with its timestamps moved back when all of them are whole minutes late, with the lines after a
+    forward jump moved back, and with its few out-of-line timestamps moved between their neighbours; None when too many
+    are out of line, the checks then reject the answer. See chunking.minutes_late, chunking.jump_back and
+    chunking.repair_times."""
     starts = [s['start'] for s in transcript.segments]
     late = chunking.minutes_late(starts, duration)
-    repaired = chunking.repair_times([start - 60 * late for start in starts], duration)
+    starts = [start - 60 * late for start in starts]
+    jump = 0
+    repaired = chunking.repair_times(starts, duration)
+    # Only when too many lines are out of line: a single line minutes ahead looks like a jump too
+    if repaired is None and (jumped := chunking.jump_back(starts, duration)):
+        starts, jump = jumped
+        repaired = chunking.repair_times(starts, duration)
     if repaired is None:
         return None
     starts, moved = repaired
     segments = [s | {'start': start, 'end': start} for s, start in zip(transcript.segments, starts, strict=True)]
     for segment, following in zip(segments, segments[1:], strict=False):
         segment['end'] = max(segment['start'], following['start'])
-    return ChunkTranscript(segments, transcript.unparsed), moved, late
+    return ChunkTranscript(segments, transcript.unparsed), TimestampRepair(moved, late, jump)
 
 
 @dataclass
@@ -1041,7 +1058,10 @@ class ChunkedRun:
         except TranscriptionFailed as e:
             problems.append(problem(e.code, e.message))
         if transcript is not None and (repaired := repair_timestamps(transcript, part.duration)):
-            transcript, record['repaired_timestamps'], record['minutes_late'] = repaired
+            transcript, repair = repaired
+            record['repaired_timestamps'], record['minutes_late'] = repair.moved, repair.minutes_late
+            if repair.jump_minutes:
+                record['jump_minutes'] = repair.jump_minutes
         speech = self.speech_within(part.start, part.end)
         problems += answer_problems(response, transcript, part.duration, speech, self.context.languages)
         record['problems'] = problems

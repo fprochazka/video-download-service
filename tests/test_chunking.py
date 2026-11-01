@@ -230,3 +230,21 @@ def test_subtitles_of_another_edit_of_the_video_are_ignored():
 )
 def test_answers_written_whole_minutes_late(starts, duration, late):
     assert chunking.minutes_late(starts, duration) == late
+
+
+@pytest.mark.parametrize(
+    ('starts', 'duration', 'moved'),
+    [
+        # [00:10:04] after [00:00:59]: a minute digit slipped and every later line runs past the end
+        ([0, 30, 59, 604, 610, 700], 300, ([0, 30, 59, 64, 70, 160], 9)),
+        # [01:00:00] for the first minute, the lines after it in hours too
+        ([0, 52, 3600, 3700], 373, ([0, 52, 60, 160], 59)),
+        # A skip forward that stays inside the chunk is not a slip
+        ([0, 20, 150, 160], 300, None),
+        # Still past the end once moved back: wrong in some other way
+        ([0, 59, 604, 905], 273, None),
+        ([], 300, None),
+    ],
+)
+def test_lines_after_a_forward_jump_are_moved_back_by_whole_minutes(starts, duration, moved):
+    assert chunking.jump_back(starts, duration) == moved

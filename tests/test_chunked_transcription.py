@@ -397,6 +397,31 @@ def test_an_answer_written_a_minute_late_is_moved_back(client, downloads_dir, ge
     assert [s['start'] for s in saved['segments'][90:93]] == [900, 910, 920]
 
 
+def test_the_lines_after_a_jump_in_the_timestamps_are_moved_back(client, downloads_dir, genai, long_audio):
+    job_dir = long_job(downloads_dir)
+
+    def answers(contents):
+        start, end = chunk_range(contents)
+        text = lines_for(start, end)
+        if start == 900.0:
+            # [00:01:00] written as [00:10:00], and every line after it 9 minutes late as well
+            text = '\n'.join(
+                f'[{stamp(t if t < 60 else t + 540)}] Speaker 1: Words at {900 + t} here.' for t in range(0, 300, 10)
+            )
+        return answer(start, end, text)
+
+    genai.answer = answers
+
+    transcribe(client)
+
+    state = state_of(downloads_dir)
+    assert state['status'] == 'completed'
+    (attempt,) = state['chunks'][3]['attempts']
+    assert (attempt['jump_minutes'], attempt['minutes_late'], attempt['problems']) == (9, 0, [])
+    saved = json.loads((job_dir / 'Engine_Talk-abc.transcript.json').read_text())
+    assert [s['start'] for s in saved['segments'][95:98]] == [950, 960, 970]
+
+
 def test_a_chunk_missing_subtitle_words_is_sent_again_and_flagged(client, downloads_dir, genai, long_audio):
     job_dir = long_job(downloads_dir, subtitles=vtt([(t, f'Words at {t} here.') for t in range(0, 1200, 5)]))
     sent = []

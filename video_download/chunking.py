@@ -376,6 +376,31 @@ def minutes_late(starts: list[int], duration: float) -> int:
     return 0
 
 
+def jump_back(starts: list[int], duration: float) -> tuple[list[int], int] | None:
+    """The segment starts with the tail after a forward jump moved back by whole minutes, and by how many; None when the
+    answer has no such jump, or when the moved tail still runs past the end.
+
+    Gemini sometimes slips a digit in the middle of an answer and keeps counting from there: [00:00:59] is followed by
+    [00:10:04] for [00:01:04], or by [01:00:00] for [00:01:00], and every later line runs minutes past the end of the
+    chunk. Only such slips count: a minute M written as M0 (9 * M minutes late), or an hour digit (59 or 60 minutes late),
+    and only when the moved tail continues from the line before. Any other jump, or a tail that does not fit even when
+    moved, has timestamps that are wrong in some other way, and is left for the checks to reject.
+    """
+    if not starts or max(starts) <= duration + OVERRUN_SLACK_SECONDS:
+        return None
+    for k in range(1, len(starts)):
+        if starts[k] - starts[k - 1] < 60 or max(starts[k:]) <= duration + OVERRUN_SLACK_SECONDS:
+            continue
+        hours, minute = divmod(starts[k] // 60, 60)
+        slips = ([9 * (minute // 10)] if minute >= 10 and minute % 10 == 0 else []) + ([59, 60] if hours else [])
+        for minutes in slips:
+            tail = [start - 60 * minutes for start in starts[k:]]
+            if -5 <= tail[0] - starts[k - 1] <= 55 and max(tail) <= duration + OVERRUN_SLACK_SECONDS:
+                return starts[:k] + tail, minutes
+        return None
+    return None
+
+
 # How many timestamps of a chunk's answer may be out of line before the answer counts as broken instead of repaired
 MAX_REPAIRED_SHARE = 0.1
 MIN_REPAIRED_ALLOWED = 3
