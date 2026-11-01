@@ -104,6 +104,20 @@ The application will be available at: http://localhost:8000
 
 **Note:** The `-v $(pwd)/downloads:/app/downloads` flag mounts the downloads directory so your downloads persist outside the container.
 
+#### Container user
+
+The app does not run as root. The image defaults to uid:gid `1000:1000`, and `docker-compose.yml` sets `user: "${APP_UID:-1000}:${APP_GID:-1000}"`. The files the app writes to `downloads/` and the `instagram_cookies.txt` that yt-dlp rewrites belong to that uid on the host. If your host user is not 1000, set `APP_UID` and `APP_GID` in `.env` next to `docker-compose.yml`, or pass `--user "$(id -u):$(id -g)"` to `docker run`. The bind-mounted `downloads/` directory and `instagram_cookies.txt` must be writable by that uid.
+
+The uid does not need an `/etc/passwd` entry in the image. `HOME` is `/tmp`, so Deno and yt-dlp keep their caches in the container's `/tmp`.
+
+If an existing deployment ran as root before, its `downloads/` is owned by root and the app cannot write to it. Change the owner once, without sudo on the host, through a root container of the same service:
+
+```bash
+docker compose run --rm --no-deps --user 0 --entrypoint chown video-download -R 1000:1000 /app/downloads
+```
+
+Use your `APP_UID:APP_GID` in place of `1000:1000` if you changed them. Then start the service as usual.
+
 ### Using Tailscale (Secure Remote Access)
 
 Access your service securely over Tailscale network with automatic HTTPS.

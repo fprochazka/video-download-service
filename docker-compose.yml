@@ -4,6 +4,8 @@ services:
   video-download:
     build: .
     container_name: video-download
+    # The uid:gid the app runs as, so the files it writes to the bind mounts belong to the host user, see README
+    user: "${APP_UID:-1000}:${APP_GID:-1000}"
     networks:
       - video-download-network
     expose:
