@@ -6,7 +6,7 @@ A simple web service for downloading videos from various platforms using yt-dlp 
 
 - **Single-page web interface** with clean, modern design
 - **Asynchronous downloads** - Submit URL and get UUID immediately, download continues in background
-- **Real-time status polling** - Frontend polls every 5 seconds to check download progress
+- **Live download progress** - The job page shows the video's thumbnail, title, uploader and duration as soon as yt-dlp has read the video page, then a progress bar with percent, size, speed and time left
 - **UUID-based privacy** - Each download gets a unique UUID, files are not publicly listable
 - **Shareable job page** - Each download has its own page at `/jobs/{download_id}`, a reload or a shared link shows the same job
 - **Metadata tracking** - Comprehensive video metadata saved to JSON for each download
@@ -189,9 +189,11 @@ docker logs ts-video-download
 2. Paste a video URL (e.g., YouTube, Vimeo, etc.)
 3. Click "Download"
 4. Server returns the download ID immediately and starts the download in the background
-5. Browser opens the job page `/jobs/{download_id}`, which polls the status every 5 seconds with a spinner
+5. Browser opens the job page `/jobs/{download_id}`, which polls the status every 2 seconds while the download runs and every 5 seconds otherwise
 6. When complete, download links appear
 7. Click on file links to download videos
+
+While the download runs, the job page shows what yt-dlp is downloading: the thumbnail, title, uploader, duration, resolution and estimated size, known right after yt-dlp reads the video page. Below them is the current phase and a progress bar with the percent, the size downloaded of the total, the speed and the time left. When the site gives no total size, the page shows only the size downloaded and no bar, and an estimated total gets a `≈`. YouTube serves the video and the audio as separate formats, so the page says which part it downloads (`Downloading the video (1/2)...`, then the audio), then that it merges them. Each part has its own percent. The thumbnail loads straight from the site, without a referrer.
 
 The job page keeps the form, so you can submit another URL from it. Bookmark or share the job page URL to come back to the download later.
 
@@ -432,7 +434,7 @@ The endpoint has no authentication and no CSRF token, because the service is rea
 Tools:
 
 - `download_video(url)` - starts a job for a link to one video or one post, with the same URL rules as the web form: a link to a playlist, channel, profile or other collection is a tool error. It never transcribes: downloading and transcribing are always two steps, so the agent reads the subtitles that come free with the download before it pays for a transcript. A client without task support gets the job at once; see [MCP tasks](#mcp-tasks) for the others.
-- `get_job(download_id, wait_seconds=0)` - the job's state, the video's title, duration and uploader, the error and `error_code` of a failed job, the files with their kind, size and URL, and each transcription with its state and estimated cost. With `wait_seconds` (0 to 60) the tool answers once the job changes or ends, so an agent needs fewer calls.
+- `get_job(download_id, wait_seconds=0)` - the job's state, the video details (title, duration, uploader, thumbnail and the others of `metadata.json`), the download `progress` while it runs, the error and `error_code` of a failed job, the files with their kind, size and URL, and each transcription with its state and estimated cost. With `wait_seconds` (0 to 60) the tool answers once the job changes or ends, so an agent needs fewer calls. A change of the progress alone does not end the wait.
 - `transcribe_file(download_id, filename)` - transcribes one media file of a completed job, with the same rules as the Transcribe button. It replaces an earlier transcript of the file. The agent is told to prefer the subtitles and to call it when the user asks for a transcript, or when the job has no subtitles or they look broken: truncated, in the wrong language or garbled.
 
 Without `GEMINI_API_KEY` the server offers no transcription: there is no `transcribe_file` tool, and neither the descriptions nor the server instructions mention transcription. The service reads the key once at startup, so a change takes a restart. The transcripts resource stays, for transcripts made earlier.
@@ -454,7 +456,7 @@ The file URLs point at `GET /downloads/{download_id}/{filename}`, which needs no
 A client that supports the MCP tasks extension (`io.modelcontextprotocol/tasks`, protocol 2026-07-28) gets a task from `download_video` instead of the job. The Claude Code CLI does this from v2.1.304 in an interactive session; its VS Code extension and desktop app do not, and neither does a call from a subagent. Claude Code then follows the task on its own and gives Claude the result when the job ends, so Claude does not call `get_job`. A client without the extension gets the job at once and follows it with `get_job`.
 
 - The task ID is the job's `download_id`. `tasks/get` reads the job's `metadata.json`, so a task survives a restart of the service. A job the restart interrupted ends its task with `error_code` `interrupted`.
-- While the job runs, the task is `working`, and its `statusMessage` is the job's state, for example `queued` or `downloading`. The task asks the client to poll every 5 seconds, and its `ttlMs` is null, because the service never deletes a job's metadata.
+- While the job runs, the task is `working`, and its `statusMessage` is the job's state, for example `queued`, `downloading 42%`, `downloading 42% (video 1/2)` or `downloading, merging`. The task asks the client to poll every 5 seconds, and its `ttlMs` is null, because the service never deletes a job's metadata.
 - When the job ends, the task is `completed`, with the result that `get_job` returns. The result of a failed job has `isError: true` and the job's `error` and `error_code`. The task status stays `completed` because the extension reserves `failed` for protocol errors.
 - `tasks/cancel` is acknowledged, but it does not stop the job, because yt-dlp and Gemini cannot be stopped in the middle of a request. The task's `statusMessage` then says that the job keeps running.
 
@@ -605,9 +607,38 @@ Each download creates a `metadata.json` file with:
   "like_count": 50,
   "channel": "Channel Name",
   "thumbnail": "https://...",
-  "resolution": "1920x1080"
+  "resolution": "1920x1080",
+  "filesize_approx": 43000000,
+  "chapters_count": 2,
+  "expected_subtitles": [{"lang": "en", "auto": false}],
+  "progress": null
 }
 ```
+
+The video details (`title` to `resolution`, `filesize_approx`, `chapters_count` and `expected_subtitles`) are written right after yt-dlp extracts the video, while the job is still `downloading`, and again with the final values when it completes. `filesize_approx` is yt-dlp's estimate of the chosen formats, `expected_subtitles` the subtitle tracks the download fetches.
+
+`progress` is set only while the download runs, and is `null` once the job completes or fails:
+
+```json
+{
+  "phase": "downloading",
+  "part": "video",
+  "part_index": 1,
+  "part_count": 2,
+  "downloaded_bytes": 16800000,
+  "total_bytes": 40000000,
+  "total_estimated": false,
+  "percent": 42.0,
+  "speed": 2000000.0,
+  "eta": 12,
+  "fragment_index": null,
+  "fragment_count": null,
+  "filename": "Video_Title-dQw4w9WgXcQ.f137.mp4",
+  "updated_at": "2025-01-14T12:01:05+00:00"
+}
+```
+
+`phase` is `downloading`, `merging` (ffmpeg joins the video and audio), `postprocessing` or `subtitles`. `part`, `part_index` and `part_count` are set when yt-dlp downloads the video and the audio separately; the sizes, `percent`, `speed` (bytes per second) and `eta` (seconds) are then of that part. `total_estimated` is `true` when the site did not give the size and `total_bytes` is yt-dlp's estimate. yt-dlp reports progress many times a second, and every write of `metadata.json` replaces the whole file, so the service writes the progress at most every 1.5 seconds, and at once when the phase or the part changes. A failure to record the progress is logged and never fails the download.
 
 `files` lists only the media; `artifacts` lists every downloadable file of the job with its `kind` (`media`, `subtitle`, `info`, `transcript`). A transcript names its media file in `media`. For a subtitle, `lang` is yt-dlp's track key (`en`, `en-GB`, `cs-orig`) and `auto` is `true` for automatic captions. `deleted_files` keeps a record of every file removed from `artifacts`; `reason` is `user` for the delete button and `gc` for the [garbage collection](#garbage-collection), which also records leftover partial downloads with `kind` `partial`. Jobs created before artifacts existed have no `artifacts` and no `completed_at`; `/status` lists their media files as artifacts.
 
@@ -634,8 +665,8 @@ YouTube jobs also carry `used_youtube_cookies` (`true` when the retry with `yout
 2. **ID Generation** - Server creates a download directory named by a new UUIDv7
 3. **Immediate Response** - ID returned to client, HTTP request completes, the browser opens `/jobs/{uuid}`
 4. **Job queue** - The job goes into the in-process worker's download queue; at most `DOWNLOAD_CONCURRENCY` downloads run at once, the rest wait as `pending`
-5. **Status Updates** - Metadata file updated as download progresses
-6. **Polling** - Frontend polls `/status/{uuid}` every 5 seconds
+5. **Status Updates** - Metadata file gets the video details after the extraction, then the progress while the download runs
+6. **Polling** - Frontend polls `/status/{uuid}` every 2 seconds while downloading, every 5 seconds otherwise
 7. **Completion** - Files available via `/downloads/{uuid}/{filename}`
 
 ## Technologies Used

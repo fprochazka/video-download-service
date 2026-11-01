@@ -12,10 +12,13 @@ class FakeYoutubeDL:
 
     `behaviour(opts, url)` runs at extraction, writes the media files and returns the info dict or raises.
     `subtitles_behaviour(params, info)` runs in the subtitles pass (skip_download), writes subtitle files or raises.
+    `download_behaviour(ydl, info)` runs in the media pass, it can report progress through report_progress and
+    report_postprocessing like yt-dlp's downloaders do.
     """
 
     behaviour = None
     subtitles_behaviour = None
+    download_behaviour = None
     instances = []
 
     def __init__(self, opts):
@@ -40,11 +43,24 @@ class FakeYoutubeDL:
         self.processed.append(dict(self.params))
         if self.params.get('skip_download') and FakeYoutubeDL.subtitles_behaviour:
             FakeYoutubeDL.subtitles_behaviour(self.params, info)
+        if not self.params.get('skip_download') and FakeYoutubeDL.download_behaviour:
+            FakeYoutubeDL.download_behaviour(self, info)
         return info
 
     @staticmethod
     def sanitize_info(info, remove_private_keys=False):
         return json.loads(json.dumps(info, default=str))
+
+
+def report_progress(ydl: FakeYoutubeDL, info: dict, **status):
+    """Call the progress hooks the way a yt-dlp downloader does, with the info of the format it downloads"""
+    for hook in ydl.params.get('progress_hooks') or []:
+        hook(status | {'info_dict': info})
+
+
+def report_postprocessing(ydl: FakeYoutubeDL, info: dict, postprocessor: str, status: str = 'started'):
+    for hook in ydl.params.get('postprocessor_hooks') or []:
+        hook({'status': status, 'postprocessor': postprocessor, 'info_dict': info})
 
 
 def raise_like_ytdlp(exc: Exception):

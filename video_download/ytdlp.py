@@ -3,12 +3,16 @@
 import logging
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import yt_dlp
 
 from video_download import config, subtitles
 from video_download.errors import classify_error
 from video_download.storage import LOG_FILENAME, PRIVATE_FILENAMES
+
+if TYPE_CHECKING:
+    from video_download.progress import DownloadProgress
 
 # Files yt-dlp leaves behind while (or after failing at) downloading, never offered to the user
 INCOMPLETE_SUFFIXES = ('.part', '.ytdl', '.temp')
@@ -77,18 +81,26 @@ class DownloadResult:
     subtitles_error: str | None = None
 
 
-def run_ytdlp(ydl_opts: dict, url: str) -> DownloadResult:
+def run_ytdlp(ydl_opts: dict, url: str, progress: DownloadProgress | None = None) -> DownloadResult:
     """Extract once, download the media, then the subtitles from the same extraction.
 
     The subtitles get their own pass because with ignoreerrors off a failed subtitle raises, and yt-dlp writes
     subtitles before the media, so one failed track would fail the whole job. A failed subtitles pass is recorded in
-    the result and never raises.
+    the result and never raises. With progress, the video details are stored right after the extraction and yt-dlp
+    reports its progress to it.
     """
+    if progress is not None:
+        ydl_opts = ydl_opts | {
+            'progress_hooks': [progress.progress_hook],
+            'postprocessor_hooks': [progress.postprocessor_hook],
+        }
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(url, download=False)
         if info is None:
             return DownloadResult(None, [])
         tracks = subtitles.select_subtitle_tracks(info)
+        if progress is not None:
+            progress.extracted(info, tracks)
         info = ydl.process_ie_result(info, download=True)
         if info is None:
             return DownloadResult(None, [])
@@ -105,6 +117,8 @@ def run_ytdlp(ydl_opts: dict, url: str) -> DownloadResult:
                     'subtitlesformat': 'vtt/best',
                 }
             )
+            if progress is not None:
+                progress.start_subtitles()
             try:
                 ydl.process_ie_result(info, download=True)
             except Exception as e:

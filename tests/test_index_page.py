@@ -53,10 +53,67 @@ def test_job_page_polls_the_status_of_the_job_in_the_path(page_script):
     result = run_scenario(page_script, 'job-page')
 
     assert result['fetches'] == [{'url': f'/status/{JOB_ID}', 'method': 'GET', 'body': None, 'csrf': None}]
-    assert result['intervals'] == 1
+    # Polls every 5 s until the first answer says the download runs, then every 2 s
+    assert result['intervalMs'] == [5000, 2000]
+    assert result['clears'] == 1
     assert result['status']['className'] == 'status loading'
     assert 'Some video' in result['status']['text']
     assert result['submitDisabled'] is False
+
+
+EVIL_TITLE = 'Some &lt;b&gt;video&lt;/b&gt;'
+
+
+def test_downloading_job_shows_the_video_and_the_progress_of_its_part(page_script):
+    result = run_scenario(page_script, 'job-downloading')
+
+    assert result['status']['className'] == 'status loading'
+    assert result['thumbnails'] == [
+        'class="job-thumb" src="https://i.example.com/vi/abc/hq.jpg?a=1&amp;b=&quot;&gt;&lt;script&gt;alert(1)&lt;/script&gt;" '
+        'alt="" loading="lazy" referrerpolicy="no-referrer"'
+    ]
+    assert result['status']['text'] == (
+        f'Downloading the video (1/2)...{EVIL_TITLE}jawed &lt;i&gt; · 1:02:05 · 1920x1080 · ≈ 50.0 MB'
+        '25% · 12.3 MB of 50.0 MB · 2.1 MB/s · 0:18 left'
+    )
+    assert result['progressWidths'] == ['24.6%']
+    assert '<script>' not in result['html']
+    assert '<b>video' not in result['html']
+
+
+def test_downloading_job_without_a_total_size_shows_what_it_downloaded(page_script):
+    result = run_scenario(page_script, 'job-downloading-no-total')
+
+    assert result['progressWidths'] == []
+    assert result['progressText'] == ['3.0 MB downloaded · fragment 7/120']
+
+
+def test_downloading_job_marks_an_estimated_total(page_script):
+    result = run_scenario(page_script, 'job-downloading-estimate')
+
+    assert result['progressWidths'] == ['10%']
+    assert result['progressText'] == ['10% · 1.0 MB of ≈ 10.0 MB · 1.0 KB/s · 1:01:40 left']
+
+
+def test_merging_job_says_so_without_a_progress_bar(page_script):
+    result = run_scenario(page_script, 'job-merging')
+
+    assert result['status']['text'].startswith(f'Merging video and audio...{EVIL_TITLE}')
+    assert (result['progressWidths'], result['progressText']) == ([], [])
+
+
+def test_extracted_job_shows_the_video_before_the_download_reports_progress(page_script):
+    result = run_scenario(page_script, 'job-extracted')
+
+    assert result['status']['text'].startswith(f'Starting the download...{EVIL_TITLE}')
+    assert len(result['thumbnails']) == 1
+
+
+def test_thumbnail_that_is_not_an_http_url_is_left_out(page_script):
+    result = run_scenario(page_script, 'job-unsafe-thumbnail')
+
+    assert result['thumbnails'] == []
+    assert 'javascript:' not in result['html']
 
 
 def test_job_page_of_unknown_job_says_not_found(page_script):

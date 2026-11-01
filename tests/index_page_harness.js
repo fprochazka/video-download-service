@@ -11,7 +11,7 @@ const element = (id) => ({
     addEventListener(type, handler) { listeners[`${id}:${type}`] = handler; },
 });
 const elements = {};
-const result = { fetches: [], assigned: [], intervals: 0, clears: 0, confirms: [], alerts: [] };
+const result = { fetches: [], assigned: [], intervals: 0, intervalMs: [], clears: 0, confirms: [], alerts: [] };
 let fetchResponse = null;
 // When set, answers each request instead of fetchResponse
 let fetchHandler = null;
@@ -34,7 +34,7 @@ global.fetch = async (url, options = {}) => {
 };
 global.confirm = (message) => { result.confirms.push(message); return confirmAnswer; };
 global.alert = (message) => result.alerts.push(message);
-global.setInterval = () => ++result.intervals;
+global.setInterval = (handler, ms) => { result.intervalMs.push(ms); return ++result.intervals; };
 global.clearInterval = () => { result.clears++; };
 
 const completedJob = (jobId) => ({
@@ -64,6 +64,31 @@ const transcribableJob = (jobId, transcriptions) => {
     return job;
 };
 
+const downloadingJob = (jobId, progress) => ({
+    status: 'downloading', download_id: jobId, title: 'Some <b>video</b>', uploader: 'jawed <i>', duration: 3725,
+    resolution: '1920x1080', filesize_approx: 52428800,
+    thumbnail: 'https://i.example.com/vi/abc/hq.jpg?a=1&b="><script>alert(1)</script>',
+    progress,
+});
+
+const DOWNLOADING_STATES = {
+    'job-downloading': {
+        phase: 'downloading', part: 'video', part_index: 1, part_count: 2, downloaded_bytes: 12897484,
+        total_bytes: 52428800, total_estimated: false, percent: 24.6, speed: 2202009.6, eta: 18,
+        filename: 'Some_video-abc.f137.mp4',
+    },
+    'job-downloading-no-total': {
+        phase: 'downloading', downloaded_bytes: 3145728, total_bytes: null, percent: null, speed: null, eta: null,
+        fragment_index: 7, fragment_count: 120,
+    },
+    'job-downloading-estimate': {
+        phase: 'downloading', downloaded_bytes: 1048576, total_bytes: 10485760, total_estimated: true, percent: 10,
+        speed: 1024, eta: 3700,
+    },
+    'job-merging': { phase: 'merging', filename: 'Some_video-abc.mp4' },
+    'job-extracted': null,
+};
+
 const flush = () => new Promise((resolve) => setTimeout(resolve, 0));
 
 const EVIL_MEDIA = '"><img src=x onerror=alert(1)>.mp4';
@@ -79,6 +104,14 @@ const EVIL_MEDIA = '"><img src=x onerror=alert(1)>.mp4';
     } else if (scenario === 'job-page') {
         window.location.pathname = `/jobs/${jobId}`;
         fetchResponse = json(200, { status: 'downloading', download_id: jobId, title: 'Some video' });
+        eval(source);
+        listeners['window:load']();
+        await flush();
+    } else if (scenario in DOWNLOADING_STATES || scenario === 'job-unsafe-thumbnail') {
+        window.location.pathname = `/jobs/${jobId}`;
+        const job = downloadingJob(jobId, DOWNLOADING_STATES[scenario] || null);
+        if (scenario === 'job-unsafe-thumbnail') job.thumbnail = 'javascript:alert(1)';
+        fetchResponse = json(200, job);
         eval(source);
         listeners['window:load']();
         await flush();
@@ -203,6 +236,9 @@ const EVIL_MEDIA = '"><img src=x onerror=alert(1)>.mp4';
     result.transcriptions = [...html.matchAll(/<div class="file-transcription( failed)?">(.*?)<\/div>/g)].map((m) => m[2].replace(/<[^>]+>/g, '|'));
     result.costs = [...html.matchAll(/<span class="file-cost" title="([^"]*)">([^<]*)<\/span>/g)].map((m) => ({ title: m[1], text: m[2] }));
     result.transcriptText = [...html.matchAll(/<pre class="transcript-text">(.*?)<\/pre>/gs)].map((m) => m[1]);
+    result.thumbnails = [...html.matchAll(/<img ([^>]*)>/g)].map((m) => m[1]);
+    result.progressWidths = [...html.matchAll(/<div class="progress-fill" style="width: ([^"]*)">/g)].map((m) => m[1]);
+    result.progressText = [...html.matchAll(/<small class="progress-text">([^<]*)<\/small>/g)].map((m) => m[1]);
     result.deleted = [...html.matchAll(/<li class="file-deleted">(.*?)<\/li>/g)].map((m) => m[1]);
     result.html = elements.status.innerHTML;
     result.submitDisabled = elements.submitBtn.disabled;

@@ -24,6 +24,7 @@ def downloads_dir(tmp_path, monkeypatch):
     monkeypatch.delenv('TRANSCRIPTION_PRICES', raising=False)
     FakeYoutubeDL.behaviour = None
     FakeYoutubeDL.subtitles_behaviour = None
+    FakeYoutubeDL.download_behaviour = None
     FakeYoutubeDL.instances = []
     return directory
 

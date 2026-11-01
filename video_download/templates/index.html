@@ -250,6 +250,39 @@
         @keyframes spin {
             to { transform: rotate(360deg); }
         }
+        .job-progress {
+            display: flex;
+            gap: 12px;
+            align-items: flex-start;
+        }
+        .job-thumb {
+            flex: none;
+            width: 120px;
+            max-width: 30%;
+            height: auto;
+            border-radius: 4px;
+        }
+        .job-details {
+            flex: 1;
+            min-width: 0;
+        }
+        .job-title {
+            margin-top: 6px;
+            font-weight: bold;
+            word-break: break-word;
+        }
+        .progress-bar {
+            height: 8px;
+            margin: 8px 0 4px 0;
+            background-color: #ffeaa7;
+            border-radius: 4px;
+            overflow: hidden;
+        }
+        .progress-fill {
+            height: 100%;
+            background-color: #856404;
+            transition: width 0.5s;
+        }
 
         /* Mobile responsive styles */
         @media (max-width: 768px) {
@@ -386,6 +419,7 @@
             if (pollInterval) {
                 clearInterval(pollInterval);
                 pollInterval = null;
+                pollMs = null;
             }
         }
 
@@ -556,10 +590,87 @@
             return html;
         }
 
-        function ensurePolling(downloadId) {
+        // Faster while a download runs, so the progress bar moves; transcriptions take minutes
+        const POLL_MS = 5000;
+        const DOWNLOAD_POLL_MS = 2000;
+        let pollMs = null;
+
+        function ensurePolling(downloadId, ms = POLL_MS) {
+            if (pollInterval && pollMs !== ms) stopPolling();
             if (!pollInterval) {
-                pollInterval = setInterval(() => pollStatus(downloadId), 5000);
+                pollInterval = setInterval(() => pollStatus(downloadId), ms);
+                pollMs = ms;
             }
+        }
+
+        function formatDuration(seconds) {
+            if (!seconds) return null;
+            const duration = Math.floor(seconds);
+            const hours = Math.floor(duration / 3600);
+            const mins = Math.floor((duration % 3600) / 60);
+            const secs = duration % 60;
+            if (hours > 0) {
+                return `${hours}:${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
+            }
+            return `${mins}:${secs.toString().padStart(2, '0')}`;
+        }
+
+        function isNumber(value) {
+            return typeof value === 'number' && isFinite(value);
+        }
+
+        function phaseLabel(status) {
+            if (status.status === 'pending') return 'Preparing download...';
+            const progress = status.progress;
+            if (!progress) return status.title ? 'Starting the download...' : 'Downloading video...';
+            if (progress.phase === 'merging') return 'Merging video and audio...';
+            if (progress.phase === 'postprocessing') return 'Processing the downloaded file...';
+            if (progress.phase === 'subtitles') return 'Downloading subtitles...';
+            if (progress.part && progress.part_index && progress.part_count) {
+                return `Downloading the ${progress.part} (${progress.part_index}/${progress.part_count})...`;
+            }
+            return 'Downloading video...';
+        }
+
+        // 42% · 12.3 MB of 50.0 MB · 2.1 MB/s · 0:18 left; a size yt-dlp only estimates gets a ≈
+        function progressText(progress) {
+            const parts = [];
+            if (isNumber(progress.percent)) parts.push(`${progress.percent.toFixed(0)}%`);
+            if (isNumber(progress.downloaded_bytes)) {
+                const total = isNumber(progress.total_bytes) ? ` of ${progress.total_estimated ? '≈ ' : ''}${formatSize(progress.total_bytes)}` : ' downloaded';
+                parts.push(formatSize(progress.downloaded_bytes) + total);
+            }
+            if (isNumber(progress.speed)) parts.push(`${formatSize(progress.speed)}/s`);
+            if (isNumber(progress.eta)) parts.push(`${formatDuration(progress.eta) || '0:00'} left`);
+            if (isNumber(progress.fragment_index) && isNumber(progress.fragment_count)) {
+                parts.push(`fragment ${progress.fragment_index}/${progress.fragment_count}`);
+            }
+            return parts.join(' · ');
+        }
+
+        function renderProgress(progress) {
+            if (!progress || progress.phase !== 'downloading' && progress.phase !== 'subtitles') return '';
+            const percent = isNumber(progress.percent) ? Math.max(0, Math.min(100, progress.percent)) : null;
+            const bar = percent === null ? '' : `<div class="progress-bar"><div class="progress-fill" style="width: ${percent}%"></div></div>`;
+            const text = progressText(progress);
+            return bar + (text ? `<small class="progress-text">${escapeHtml(text)}</small>` : '');
+        }
+
+        // What is being downloaded, known from the extraction long before the download ends, and how far it got
+        function renderDownloading(status) {
+            const thumbnail = typeof status.thumbnail === 'string' && /^https?:\/\//i.test(status.thumbnail)
+                ? `<img class="job-thumb" src="${escapeHtml(status.thumbnail)}" alt="" loading="lazy" referrerpolicy="no-referrer">`
+                : '';
+            const size = isNumber(status.filesize_approx) ? `≈ ${formatSize(status.filesize_approx)}` : null;
+            const byline = [status.uploader || status.channel, formatDuration(status.duration), status.resolution, size].filter(Boolean).join(' · ');
+            return '<div class="job-progress">'
+                + thumbnail
+                + '<div class="job-details">'
+                + `<div><span class="spinner"></span>${escapeHtml(phaseLabel(status))}</div>`
+                + (status.title ? `<div class="job-title">${escapeHtml(status.title)}</div>` : '')
+                + (byline ? `<small>${escapeHtml(byline)}</small>` : '')
+                + renderProgress(status.progress)
+                + '</div></div>';
         }
 
         async function transcribeFile(downloadId, filename) {
@@ -641,16 +752,9 @@
 
                 // Update UI based on status
                 if (status.status === 'pending' || status.status === 'downloading') {
+                    ensurePolling(downloadId, status.status === 'downloading' ? DOWNLOAD_POLL_MS : POLL_MS);
                     statusDiv.className = 'status loading';
-                    let message = status.status === 'pending' ?
-                        'Preparing download...' :
-                        'Downloading video...';
-
-                    if (status.title) {
-                        message += `<br><small>${escapeHtml(status.title)}</small>`;
-                    }
-
-                    statusDiv.innerHTML = `<div><span class="spinner"></span>${message}</div>`;
+                    statusDiv.innerHTML = renderDownloading(status);
                     cancelBtn.style.display = 'inline-block';
                 } else if (status.status === 'completed') {
                     // A transcription of one of the files runs after the download, keep polling until it ends
@@ -674,19 +778,6 @@
                     filesHtml += '<div class="metadata">';
                     filesHtml += '<h3>Video Information</h3>';
                     filesHtml += '<div class="metadata-grid">';
-
-                    // Format duration helper
-                    function formatDuration(seconds) {
-                        if (!seconds) return null;
-                        const duration = Math.floor(seconds);
-                        const hours = Math.floor(duration / 3600);
-                        const mins = Math.floor((duration % 3600) / 60);
-                        const secs = duration % 60;
-                        if (hours > 0) {
-                            return `${hours}:${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
-                        }
-                        return `${mins}:${secs.toString().padStart(2, '0')}`;
-                    }
 
                     // Format date helper
                     function formatDate(dateStr) {
@@ -846,8 +937,7 @@
                 statusDiv.innerHTML = '<div><span class="spinner"></span>Checking download status...</div>';
                 cancelBtn.style.display = 'inline-block';
 
-                // Start polling
-                pollInterval = setInterval(() => pollStatus(downloadId), 5000);
+                ensurePolling(downloadId);
                 pollStatus(downloadId);
             }
         });

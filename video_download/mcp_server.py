@@ -23,7 +23,7 @@ from mcp_types import ToolAnnotations
 from pydantic import BaseModel, Field
 
 from video_download import config, jobs, transcription
-from video_download.status import status_response
+from video_download.status import ExpectedSubtitle, Progress, status_response
 from video_download.storage import LOG_FILENAME, TRANSCRIPT, load_metadata
 from video_download.urls import InvalidDownloadUrl
 from video_download.worker import JobWorker
@@ -122,7 +122,7 @@ def get_job_description(transcription: bool) -> str:
         if transcription
         else 'pending, downloading, completed or failed'
     )
-    contents = 'the files with kind, size and download URL, '
+    contents = 'the video details, the download progress while it runs, the files with kind, size and download URL, '
     if transcription:
         contents += 'each transcription with its state and estimated cost, '
     return '\n'.join(
@@ -178,7 +178,7 @@ def job_state(metadata: dict) -> tuple[str, str]:
     if status == 'pending':
         return 'pending', 'queued'
     if status == 'downloading':
-        return 'downloading', 'downloading'
+        return 'downloading', downloading_message(metadata.get('progress'))
     if status == 'failed':
         return 'failed', f'failed ({metadata.get("error_code") or "unknown"}): {metadata.get("error") or ""}'.strip()
     states = [state or {} for state in (metadata.get('transcriptions') or {}).values()]
@@ -187,6 +187,22 @@ def job_state(metadata: dict) -> tuple[str, str]:
         current = min(len(states) - len(active) + 1, len(states))
         return 'transcribing', f'transcribing {current}/{len(states)}'
     return 'completed', 'completed'
+
+
+def downloading_message(progress: dict | None) -> str:
+    """downloading, with the percent once yt-dlp reports it: downloading 42%, downloading 42% (audio 2/2), merging"""
+    if not progress:
+        return 'downloading'
+    phase = progress.get('phase')
+    if phase in ('merging', 'postprocessing'):
+        return f'downloading, {phase}'
+    message = 'downloading subtitles' if phase == 'subtitles' else 'downloading'
+    if progress.get('percent') is not None:
+        message += f' {progress["percent"]:.0f}%'
+    if progress.get('part_index') and progress.get('part_count'):
+        part = f'{progress.get("part") or "part"} {progress["part_index"]}/{progress["part_count"]}'
+        message += f' ({part})'
+    return message
 
 
 def format_size(size: int | None) -> str:
@@ -237,6 +253,15 @@ class Job(BaseModel):
     title: str | None
     duration: int | None = Field(description='seconds')
     uploader: str | None
+    channel: str | None
+    upload_date: str | None = Field(description='YYYYMMDD')
+    thumbnail: str | None = Field(description='image URL on the site')
+    webpage_url: str | None
+    resolution: str | None
+    filesize_approx: int | None = Field(description='bytes, estimated before the download')
+    chapters_count: int | None
+    expected_subtitles: list[ExpectedSubtitle] | None = Field(description='the subtitle tracks the download fetches')
+    progress: Progress | None = Field(description='while downloading')
     error: str | None
     error_code: str | None
     transcription_available: bool
@@ -313,6 +338,15 @@ def job_summary(download_dir: Path, metadata: dict, base_url: str | None) -> dic
         title=status.title,
         duration=status.duration,
         uploader=status.uploader,
+        channel=status.channel,
+        upload_date=status.upload_date,
+        thumbnail=status.thumbnail,
+        webpage_url=status.webpage_url,
+        resolution=status.resolution,
+        filesize_approx=status.filesize_approx,
+        chapters_count=status.chapters_count,
+        expected_subtitles=status.expected_subtitles,
+        progress=status.progress,
         error=status.error,
         error_code=status.error_code,
         transcription_available=status.transcription_available,
@@ -377,17 +411,22 @@ def job_result(download_dir: Path, metadata: dict, base_url: str | None, is_erro
     return ToolResult(content=content, structured_content=summary, is_error=is_error)
 
 
+def change_key(metadata: dict) -> dict:
+    """The metadata without the download progress, which changes every few seconds and would end every wait at once"""
+    return {key: value for key, value in metadata.items() if key not in ('progress', 'updated_at')}
+
+
 async def wait_for_change(download_dir: Path, metadata: dict, wait_seconds: float) -> dict:
-    """The job's metadata once it changed or the job is done, or after wait_seconds"""
+    """The job's metadata once it changed, other than its progress, or the job is done, or after wait_seconds"""
     deadline = asyncio.get_running_loop().time() + wait_seconds
-    seen = metadata.get('updated_at')
+    seen = change_key(metadata)
     while job_state(metadata)[0] not in TERMINAL_STATES:
         remaining = deadline - asyncio.get_running_loop().time()
         if remaining <= 0:
             break
         await asyncio.sleep(min(WAIT_POLL_SECONDS, remaining))
         metadata = load_metadata(download_dir) or metadata
-        if metadata.get('updated_at') != seen:
+        if change_key(metadata) != seen:
             break
     return metadata
 

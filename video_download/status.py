@@ -2,7 +2,7 @@
 
 from pathlib import Path
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from video_download import config, transcription
 from video_download.storage import job_artifacts, media_files
@@ -67,6 +67,30 @@ class Transcription(BaseModel):
     files: list[str] = []
 
 
+class ExpectedSubtitle(BaseModel):
+    lang: str
+    auto: bool
+
+
+class Progress(BaseModel):
+    """yt-dlp's progress of a running download; the sizes, percent, speed and ETA are of the part being downloaded"""
+
+    phase: str = Field(description='downloading, merging, postprocessing or subtitles')
+    part: str | None = Field(None, description='video or audio, when they download separately before a merge')
+    part_index: int | None = Field(None, description='1-based, of part_count')
+    part_count: int | None = None
+    downloaded_bytes: int | None = None
+    total_bytes: int | None = None
+    total_estimated: bool = Field(False, description="total_bytes is yt-dlp's estimate")
+    percent: float | None = None
+    speed: float | None = Field(None, description='bytes per second')
+    eta: int | None = Field(None, description='seconds')
+    fragment_index: int | None = None
+    fragment_count: int | None = None
+    filename: str | None = None
+    updated_at: str | None = None
+
+
 class DownloadStatus(BaseModel):
     download_id: str
     status: str  # pending, downloading, completed, failed
@@ -102,6 +126,11 @@ class DownloadStatus(BaseModel):
     channel: str | None = None
     view_count: int | None = None
     like_count: int | None = None
+    # Known right after the extraction, before the download ends
+    filesize_approx: int | None = None
+    chapters_count: int | None = None
+    expected_subtitles: list[ExpectedSubtitle] | None = None
+    progress: Progress | None = None
 
 
 def status_response(download_dir: Path, metadata: dict) -> DownloadStatus:
