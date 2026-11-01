@@ -16,6 +16,7 @@ from video_download import cleanup, config, transcription
 from video_download.csrf import page_token, require_csrf, set_token_cookie
 from video_download.jobs import fail_interrupted_downloads, submit_download
 from video_download.mcp_server import create_server
+from video_download.mcp_tasks import JobTasksExtension
 from video_download.status import status_response
 from video_download.storage import ACTIVE_STATUSES, job_artifacts, load_metadata, remove_artifacts
 from video_download.urls import InvalidDownloadUrl
@@ -63,6 +64,7 @@ async def lifespan(fastapi_app: FastAPI):
 
 
 mcp_server = create_server(lambda: app.state.worker)
+mcp_server.add_extension(JobTasksExtension())
 # Stateless: each MCP request stands on its own and every tool reads the job from disk, so no session outlives a restart.
 # The Host guard keeps a page on another site from reaching the endpoint through DNS rebinding; there is no auth or
 # CSRF token on /mcp, the service is only reachable on the tailnet

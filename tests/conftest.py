@@ -7,6 +7,9 @@ from tests.ytdlp_fakes import FakeYoutubeDL
 from video_download import audio, config, gemini, web
 from video_download.csrf import CSRF_COOKIE, CSRF_HEADER
 
+# PUBLIC_BASE_URL of the MCP tests
+BASE_URL = 'https://video-download.example.ts.net'
+
 
 @pytest.fixture
 def downloads_dir(tmp_path, monkeypatch):
@@ -67,3 +70,15 @@ def fake_audio(monkeypatch):
     monkeypatch.setattr(audio, 'extract_audio', extract)
     monkeypatch.setattr(audio, 'probe_duration', probe)
     return extracted
+
+
+@pytest.fixture
+def anyio_backend():
+    """The async tests run on asyncio, like the app"""
+    return 'asyncio'
+
+
+@pytest.fixture
+def public_base_url(monkeypatch):
+    monkeypatch.setenv('PUBLIC_BASE_URL', BASE_URL + '/')
+    return BASE_URL

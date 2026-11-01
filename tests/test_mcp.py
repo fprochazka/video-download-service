@@ -8,23 +8,12 @@ from fastmcp.client.transports import StreamableHttpTransport
 from fastmcp.exceptions import ToolError
 from fastmcp.utilities.asgi_transport import StreamingASGITransport, run_asgi_lifespan
 
+from tests.conftest import BASE_URL
 from tests.ytdlp_fakes import FakeYoutubeDL, read_metadata, write_media
 from video_download import config, mcp_server, web
 
 VIDEO_URL = 'https://www.youtube.com/watch?v=jNQXAC9IVRw'
 MEDIA = 'Me_at_the_zoo-jNQXAC9IVRw.mp4'
-BASE_URL = 'https://video-download.example.ts.net'
-
-
-@pytest.fixture
-def anyio_backend():
-    return 'asyncio'
-
-
-@pytest.fixture
-def public_base_url(monkeypatch):
-    monkeypatch.setenv('PUBLIC_BASE_URL', BASE_URL + '/')
-    return BASE_URL
 
 
 def video(opts, url):
@@ -48,8 +37,14 @@ def http_client(host='localhost', headers=None) -> httpx2.AsyncClient:
     return httpx2.AsyncClient(transport=StreamingASGITransport(web.app), base_url=f'http://{host}', headers=headers)
 
 
+class PlainClient(Client):
+    """A client without the tasks extension, which fastmcp_tasks adds to every Client once a test imports it"""
+
+    _auto_internal_extensions = False
+
+
 @asynccontextmanager
-async def mcp_client(host='localhost', headers=None, client_class=Client):
+async def mcp_client(host='localhost', headers=None, client_class=PlainClient):
     """A client of the app's /mcp endpoint over HTTP, in process"""
 
     def factory(**kwargs):

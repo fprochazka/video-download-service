@@ -403,6 +403,15 @@ Resources, one template each:
 
 The file URLs point at `GET /downloads/{download_id}/{filename}`, which needs no authentication; anyone on the tailnet with the URL can fetch the file. The service builds them from `PUBLIC_BASE_URL`, which `docker-compose.yml` sets to the tailnet URL. Without it, the URLs use the `X-Forwarded-Proto` and `X-Forwarded-Host` headers of the MCP request, or else its `Host` header.
 
+#### MCP tasks
+
+A client that supports the MCP tasks extension (`io.modelcontextprotocol/tasks`, protocol 2026-07-28) gets a task from `download_video` instead of the job. The Claude Code CLI does this from v2.1.304 in an interactive session; its VS Code extension and desktop app do not, and neither does a call from a subagent. Claude Code then follows the task on its own and gives Claude the result when the job ends, so Claude does not call `get_job`. A client without the extension gets the job at once and follows it with `get_job`.
+
+- The task ID is the job's `download_id`. `tasks/get` reads the job's `metadata.json`, so a task survives a restart of the service. A job the restart interrupted ends its task with `error_code` `interrupted`.
+- While the job runs, the task is `working`, and its `statusMessage` is the job's state, for example `downloading` or `transcribing 1/1`. With `transcribe`, the task ends only after the transcription has ended. The task asks the client to poll every 5 seconds, and its `ttlMs` is null, because the service never deletes a job's metadata.
+- When the job ends, the task is `completed`, with the result that `get_job` returns. The result of a failed job has `isError: true` and the job's `error` and `error_code`. The task status stays `completed` because the extension reserves `failed` for protocol errors.
+- `tasks/cancel` is acknowledged, but it does not stop the job, because yt-dlp and Gemini cannot be stopped in the middle of a request. The task's `statusMessage` then says that the job keeps running.
+
 ### Garbage collection
 
 The service deletes large media of old jobs, so the downloads directory does not grow forever. It runs once in the background a moment after startup, then every `GC_INTERVAL_HOURS`.
@@ -433,6 +442,7 @@ video-download/
 ├── video_download/
 │   ├── web.py           # FastAPI app and routes
 │   ├── mcp_server.py    # The MCP server at /mcp: tools and resources
+│   ├── mcp_tasks.py     # MCP tasks of download_video, read from metadata.json
 │   ├── status.py        # The job status the API and the MCP tools return
 │   ├── jobs.py          # Job creation, the download task, the startup sweep
 │   ├── worker.py        # In-process job queues with a concurrency limit per lane
