@@ -71,7 +71,7 @@ async def test_lists_the_tools_with_their_annotations(downloads_dir, genai):
     assert tools['get_job'].annotations.idempotent_hint is True
     assert tools['download_video'].annotations.read_only_hint is False
     assert tools['transcribe_file'].annotations.read_only_hint is False
-    assert set(tools['download_video'].input_schema['properties']) == {'url', 'transcribe'}
+    assert set(tools['download_video'].input_schema['properties']) == {'url'}
     assert {tool.title for tool in tools.values()} == {
         'Download a video',
         'Get a download job',
@@ -99,7 +99,12 @@ async def test_the_tool_descriptions_tell_an_agent_how_to_use_the_tools(download
     assert 'video-download://jobs/{id}/' in download.description
     assert 'youtube' not in download.description.lower() + str(download.input_schema).lower()
     assert 'ONE video' in download.input_schema['properties']['url']['description']
-    assert '$0.13 per hour' in download.input_schema['properties']['transcribe']['description']
+    assert 'when the user asks for a transcript' in download.description
+    assert 'transcribe a video file with transcribe_file' in download.description
+    assert 'longer with transcribe' not in download.description
+    assert '$0.13 per hour' in tools['transcribe_file'].description
+    assert 'when the user asks for a transcript' in tools['transcribe_file'].description
+    assert 'no subtitle files' in tools['transcribe_file'].description
     get_job = tools['get_job']
     assert 'pending, downloading, transcribing' in get_job.description
     wait = get_job.input_schema['properties']['wait_seconds']
@@ -111,7 +116,9 @@ async def test_the_tool_descriptions_tell_an_agent_how_to_use_the_tools(download
     assert 'replaces an earlier one' in transcribe.description
     assert 'video or audio files' in transcribe.input_schema['properties']['filename']['description']
     assert 'title' not in get_job.output_schema['properties']['state']
-    assert 'transcribe=true' in instructions
+    assert "Prefer the job's subtitle files" in instructions
+    assert 'when the user asks for one' in instructions
+    assert 'transcribe=true' not in instructions
     assert 'youtube' not in instructions.lower()
 
 
@@ -148,12 +155,12 @@ async def test_structured_content_matches_the_advertised_output_schema(
 
     async with running_app(), mcp_client() as client:
         schemas = {tool.name: tool.output_schema for tool in await client.list_tools()}
-        started = await client.call_tool('download_video', {'url': VIDEO_URL, 'transcribe': True})
+        started = await client.call_tool('download_video', {'url': VIDEO_URL})
         download_id = started.structured_content['download_id']
         await jobs_done()
-        transcribed = await client.call_tool('get_job', {'download_id': download_id})
-        retranscribing = await client.call_tool('transcribe_file', {'download_id': download_id, 'filename': MEDIA})
+        transcribing = await client.call_tool('transcribe_file', {'download_id': download_id, 'filename': MEDIA})
         await jobs_done()
+        transcribed = await client.call_tool('get_job', {'download_id': download_id})
         FakeYoutubeDL.behaviour = lambda opts, url: raise_like_ytdlp(Exception('Video unavailable'))
         failing = await client.call_tool('download_video', {'url': VIDEO_URL})
         await jobs_done()
@@ -164,7 +171,7 @@ async def test_structured_content_matches_the_advertised_output_schema(
     for name, result in [
         ('download_video', started),
         ('get_job', transcribed),
-        ('transcribe_file', retranscribing),
+        ('transcribe_file', transcribing),
         ('download_video', failing),
         ('get_job', failed),
     ]:
@@ -248,14 +255,33 @@ async def test_download_video_rejects_a_playlist_without_creating_a_job(download
 
 
 @pytest.mark.anyio
-async def test_transcribe_true_transcribes_every_media_file_after_the_download(
+async def test_download_video_never_transcribes_and_rejects_a_transcribe_argument(downloads_dir, genai):
+    FakeYoutubeDL.behaviour = video
+
+    async with running_app(), mcp_client() as client:
+        with pytest.raises(ToolError, match='Unexpected keyword argument'):
+            await client.call_tool('download_video', {'url': VIDEO_URL, 'transcribe': True})
+        started = await client.call_tool('download_video', {'url': VIDEO_URL})
+        await jobs_done()
+        result = await client.call_tool('get_job', {'download_id': started.structured_content['download_id']})
+
+    assert result.structured_content['state'] == 'completed'
+    assert result.structured_content['transcriptions'] == {}
+    assert genai.requests == []
+    assert len(FakeYoutubeDL.instances) == 1
+
+
+@pytest.mark.anyio
+async def test_a_transcript_of_transcribe_file_is_listed_and_readable_as_a_resource(
     downloads_dir, public_base_url, genai, fake_audio
 ):
     FakeYoutubeDL.behaviour = video
 
     async with running_app(), mcp_client() as client:
-        started = await client.call_tool('download_video', {'url': VIDEO_URL, 'transcribe': True})
+        started = await client.call_tool('download_video', {'url': VIDEO_URL})
         download_id = started.structured_content['download_id']
+        await jobs_done()
+        await client.call_tool('transcribe_file', {'download_id': download_id, 'filename': MEDIA})
         await jobs_done()
         result = await client.call_tool('get_job', {'download_id': download_id})
         transcript = await client.read_resource(
@@ -263,7 +289,6 @@ async def test_transcribe_true_transcribes_every_media_file_after_the_download(
         )
 
     job = result.structured_content
-    assert job['auto_transcribe'] is True
     assert job['state'] == 'completed'
     state = job['transcriptions'][MEDIA]
     assert state['status'] == 'completed'
@@ -279,27 +304,6 @@ async def test_transcribe_true_transcribes_every_media_file_after_the_download(
     assert content.text.startswith('# Me at the zoo\n')
     assert '**[00:01] Speaker 1:** Hello and welcome. Today we talk about engines.' in content.text
     assert len(genai.requests) == 1
-
-
-@pytest.mark.anyio
-async def test_transcribe_true_completes_the_download_when_the_key_is_gone_before_the_transcription(
-    downloads_dir, genai, fake_audio, monkeypatch
-):
-    FakeYoutubeDL.behaviour = video
-
-    async with running_app(), mcp_client() as client:
-        monkeypatch.delenv('GEMINI_API_KEY')
-        started = await client.call_tool('download_video', {'url': VIDEO_URL, 'transcribe': True})
-        await jobs_done()
-        result = await client.call_tool('get_job', {'download_id': started.structured_content['download_id']})
-
-    job = result.structured_content
-    assert job['state'] == 'completed'
-    assert job['transcription_available'] is False
-    assert [f['kind'] for f in job['files']] == ['media', 'info']
-    state = job['transcriptions'][MEDIA]
-    assert (state['status'], state['error_code']) == ('failed', 'not_configured')
-    assert 'Transcription is not configured, set GEMINI_API_KEY.' in result.content[0].text
 
 
 @pytest.mark.anyio

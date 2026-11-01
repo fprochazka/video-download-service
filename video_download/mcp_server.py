@@ -42,13 +42,6 @@ VideoUrl = Annotated[
     str,
     Field(description='An http(s) link to the page of ONE video, or of one post'),
 ]
-Transcribe = Annotated[
-    bool,
-    Field(
-        description='Also transcribe each downloaded video or audio file with Gemini after the download, about $0.13 per '
-        'hour of speech'
-    ),
-]
 DownloadId = Annotated[
     str,
     Field(description='The job id (a UUID) that download_video returned', json_schema_extra={'format': 'uuid'}),
@@ -72,8 +65,16 @@ def instructions(transcription: bool) -> str:
     lines = [
         'Downloads videos from the sites yt-dlp supports'
         + (' and transcribes them with Gemini.' if transcription else '.'),
-        'Call download_video with a link to one video or post'
-        + (', with transcribe=true for a transcript.' if transcription else '.'),
+        'Call download_video with a link to one video or post.',
+        *(
+            [
+                "Prefer the job's subtitle files, they come free with the download. Call transcribe_file for a Gemini "
+                'transcript, which costs money, when the user asks for one, or when the subtitles are missing or look '
+                'broken (truncated, in the wrong language, garbled).'
+            ]
+            if transcription
+            else []
+        ),
         'When download_video answers with a job that has not finished yet, call get_job with its download_id and '
         'wait_seconds=60 until the state is completed or failed.',
         'The result lists the files with download URLs'
@@ -98,9 +99,17 @@ def download_video_description(transcription: bool) -> str:
             'Pass a link to that one video or post. Do not pass links to playlists, channels, profiles or other '
             'collections, they are rejected even when they hold one video. A video link that also refers to a playlist '
             'downloads only the video.',
-            'A download takes from seconds to several minutes'
-            + (', longer with transcribe.' if transcription else '.'),
+            'A download takes from seconds to several minutes.',
             'If the answer is a job that has not finished yet, follow it with get_job, using wait_seconds to wait.',
+            *(
+                [
+                    "Subtitles in the video's language and in English come with the download when the site has them. "
+                    'Prefer them; transcribe a video file with transcribe_file when the user asks for a transcript, or '
+                    'when the subtitles are missing or look broken (truncated, in the wrong language, garbled).'
+                ]
+                if transcription
+                else []
+            ),
             f'The result lists every file ({files}) with a plain HTTP download URL, unauthenticated and reachable on '
             f'the private network, and video-download://jobs/{{id}}/... resources for {resources}.',
         ]
@@ -127,6 +136,8 @@ def get_job_description(transcription: bool) -> str:
 
 TRANSCRIBE_FILE_DESCRIPTION = """Transcribe one video or audio file of a completed job with Gemini, about $0.13 per \
 hour of speech.
+Use it when the user asks for a transcript, or when the job has no subtitle files or they look broken: truncated, in \
+the wrong language or garbled. Otherwise prefer the subtitles.
 A new transcript replaces an earlier one of the same file.
 The call answers at once, follow the transcription with get_job."""
 
@@ -228,7 +239,6 @@ class Job(BaseModel):
     uploader: str | None
     error: str | None
     error_code: str | None
-    auto_transcribe: bool
     transcription_available: bool
     files: list[JobFile]
     transcriptions: dict[str, JobTranscription] = Field(description='by media file name')
@@ -305,7 +315,6 @@ def job_summary(download_dir: Path, metadata: dict, base_url: str | None) -> dic
         uploader=status.uploader,
         error=status.error,
         error_code=status.error_code,
-        auto_transcribe=status.auto_transcribe,
         transcription_available=status.transcription_available,
         files=files,
         transcriptions=transcriptions,
@@ -397,38 +406,26 @@ def read_job_file(download_id: str, name: str) -> Path:
 def create_server(get_worker: Callable[[], JobWorker], transcription_available: bool) -> FastMCP:
     """The MCP server; get_worker returns the app's job worker, which the app's lifespan starts.
 
-    Without transcription_available (no GEMINI_API_KEY) the server offers no transcription at all: download_video has
-    no transcribe parameter and there is no transcribe_file tool, so an agent never sees an option that cannot work.
+    Downloading and transcribing are always two steps: download_video, then transcribe_file when the user asks for a
+    transcript or the subtitles are missing or broken. Without transcription_available (no GEMINI_API_KEY) there is no transcribe_file tool
+    and no description mentions transcription, so an agent never sees an option that cannot work.
     """
     server = FastMCP('video-download', instructions=instructions(transcription_available))
 
-    async def start_download(url: str, transcribe: bool) -> ToolResult:
-        try:
-            download_id = jobs.submit_download(get_worker(), url, auto_transcribe=transcribe)
-        except InvalidDownloadUrl as e:
-            raise ToolError(str(e)) from e
-        logger.info('Download %s submitted over MCP: transcribe=%s', download_id, transcribe)
-        download_dir = config.DOWNLOADS_DIR / download_id
-        return job_result(download_dir, load_metadata(download_dir), request_base_url())
-
-    download_tool = server.tool(
-        name='download_video',
+    @server.tool(
         title='Download a video',
         description=download_video_description(transcription_available),
         output_schema=JOB_SCHEMA,
         annotations=ToolAnnotations(read_only_hint=False, destructive_hint=False, open_world_hint=True),
     )
-    if transcription_available:
-
-        @download_tool
-        async def download_and_transcribe(url: VideoUrl, transcribe: Transcribe = False) -> ToolResult:
-            return await start_download(url, transcribe)
-
-    else:
-
-        @download_tool
-        async def download_video(url: VideoUrl) -> ToolResult:
-            return await start_download(url, False)
+    async def download_video(url: VideoUrl) -> ToolResult:
+        try:
+            download_id = jobs.submit_download(get_worker(), url)
+        except InvalidDownloadUrl as e:
+            raise ToolError(str(e)) from e
+        logger.info('Download %s submitted over MCP', download_id)
+        download_dir = config.DOWNLOADS_DIR / download_id
+        return job_result(download_dir, load_metadata(download_dir), request_base_url())
 
     @server.tool(
         title='Get a download job',

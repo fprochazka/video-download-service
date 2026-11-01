@@ -430,11 +430,11 @@ The endpoint has no authentication and no CSRF token, because the service is rea
 
 Tools:
 
-- `download_video(url, transcribe=false)` - starts a job for a link to one video or one post, with the same URL rules as the web form: a link to a playlist, channel, profile or other collection is a tool error. With `transcribe` set, the service transcribes every media file of the job once the download completes. A client without task support gets the job at once; see [MCP tasks](#mcp-tasks) for the others.
+- `download_video(url)` - starts a job for a link to one video or one post, with the same URL rules as the web form: a link to a playlist, channel, profile or other collection is a tool error. It never transcribes: downloading and transcribing are always two steps, so the agent reads the subtitles that come free with the download before it pays for a transcript. A client without task support gets the job at once; see [MCP tasks](#mcp-tasks) for the others.
 - `get_job(download_id, wait_seconds=0)` - the job's state, the video's title, duration and uploader, the error and `error_code` of a failed job, the files with their kind, size and URL, and each transcription with its state and estimated cost. With `wait_seconds` (0 to 60) the tool answers once the job changes or ends, so an agent needs fewer calls.
-- `transcribe_file(download_id, filename)` - transcribes one media file of a completed job, with the same rules as the Transcribe button. It replaces an earlier transcript of the file.
+- `transcribe_file(download_id, filename)` - transcribes one media file of a completed job, with the same rules as the Transcribe button. It replaces an earlier transcript of the file. The agent is told to prefer the subtitles and to call it when the user asks for a transcript, or when the job has no subtitles or they look broken: truncated, in the wrong language or garbled.
 
-Without `GEMINI_API_KEY` the server offers no transcription: `download_video` has no `transcribe` parameter, there is no `transcribe_file` tool, and neither the descriptions nor the server instructions mention transcription. The service reads the key once at startup, so a change takes a restart. The transcripts resource stays, for transcripts made earlier.
+Without `GEMINI_API_KEY` the server offers no transcription: there is no `transcribe_file` tool, and neither the descriptions nor the server instructions mention transcription. The service reads the key once at startup, so a change takes a restart. The transcripts resource stays, for transcripts made earlier.
 
 Each tool advertises the shape of its structured content as an `outputSchema`; all three return the same job object.
 
@@ -453,7 +453,7 @@ The file URLs point at `GET /downloads/{download_id}/{filename}`, which needs no
 A client that supports the MCP tasks extension (`io.modelcontextprotocol/tasks`, protocol 2026-07-28) gets a task from `download_video` instead of the job. The Claude Code CLI does this from v2.1.304 in an interactive session; its VS Code extension and desktop app do not, and neither does a call from a subagent. Claude Code then follows the task on its own and gives Claude the result when the job ends, so Claude does not call `get_job`. A client without the extension gets the job at once and follows it with `get_job`.
 
 - The task ID is the job's `download_id`. `tasks/get` reads the job's `metadata.json`, so a task survives a restart of the service. A job the restart interrupted ends its task with `error_code` `interrupted`.
-- While the job runs, the task is `working`, and its `statusMessage` is the job's state, for example `downloading` or `transcribing 1/1`. With `transcribe`, the task ends only after the transcription has ended. The task asks the client to poll every 5 seconds, and its `ttlMs` is null, because the service never deletes a job's metadata.
+- While the job runs, the task is `working`, and its `statusMessage` is the job's state, for example `queued` or `downloading`. The task asks the client to poll every 5 seconds, and its `ttlMs` is null, because the service never deletes a job's metadata.
 - When the job ends, the task is `completed`, with the result that `get_job` returns. The result of a failed job has `isError: true` and the job's `error` and `error_code`. The task status stays `completed` because the extension reserves `failed` for protocol errors.
 - `tasks/cancel` is acknowledged, but it does not stop the job, because yt-dlp and Gemini cannot be stopped in the middle of a request. The task's `statusMessage` then says that the job keeps running.
 
@@ -563,7 +563,6 @@ Each download creates a `metadata.json` file with:
   "url": "original_url",
   "download_url": "url_passed_to_yt_dlp",
   "extractor": "Youtube",
-  "auto_transcribe": false,
   "status": "completed|downloading|pending|failed",
   "files": ["Video_Title-dQw4w9WgXcQ.mp4"],
   "artifacts": [

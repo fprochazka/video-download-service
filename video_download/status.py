@@ -80,8 +80,6 @@ class DownloadStatus(BaseModel):
     error_code: str | None = None
     error_type: str | None = None
     used_youtube_cookies: bool | None = None
-    # Every media file is transcribed once the download completes, set by the MCP tool download_video
-    auto_transcribe: bool = False
     subtitles_error: str | None = None
     transcriptions: dict[str, Transcription] = {}
     # Whether the server can transcribe at all (GEMINI_API_KEY is set), the page disables its Transcribe buttons if not
