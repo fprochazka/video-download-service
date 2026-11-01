@@ -729,8 +729,12 @@ AUDIO_TOKENS_TOLERANCE = 0.03
 TIME_SLACK_SECONDS = 10
 MAX_BACKWARD_SECONDS = 5
 # More speech than this between two consecutive lines is a passage the transcript skipped; one line is at most about
-# 20 seconds of speech
+# 20 seconds of speech in English, and up to 30 in Czech, whose good answers had gaps of 28 to 30 seconds
 MAX_BLIND_SPEECH_SECONDS = 30
+# More speech than this after the last line is an answer that stopped before the end of its chunk. Of 271 saved English
+# answers that passed the other checks, the good ones had at most 20.4 seconds after their last line and the 3 that
+# stopped early 25.7; the good Czech answers had at most 16.5.
+MAX_TRAILING_SPEECH_SECONDS = 24
 MAX_LINE_REPEATS = 3
 # A chunk that has less text per minute of speech than half the median chunk, or misses more subtitle words than the
 # other chunks, is sent once more and the better answer kept; Gemini 3.5 Flash-Lite drops passages at random
@@ -826,7 +830,10 @@ def answer_problems(
         )
     if speech is not None:
         blind = chunking.largest_blind_speech(starts, speech, 0, duration)
-        if blind > MAX_BLIND_SPEECH_SECONDS:
+        trailing = chunking.speech_seconds(speech, max(starts, default=0), duration)
+        if trailing > MAX_TRAILING_SPEECH_SECONDS:
+            problems.append(problem('stopped_early', f'{trailing:.0f} s of speech after the last transcript line.'))
+        elif blind > MAX_BLIND_SPEECH_SECONDS:
             problems.append(problem('blind_gap', f'{blind:.0f} s of speech have no transcript line.'))
     return problems
 

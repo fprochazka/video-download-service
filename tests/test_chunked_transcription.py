@@ -236,8 +236,8 @@ def test_an_answer_that_fails_the_checks_is_sent_again_and_both_are_paid(client,
     assert state['status'] == 'completed'
     assert sent.count(300.0) == 2
     attempts = state['chunks'][1]['attempts']
-    assert [a['problems'][0]['code'] if a['problems'] else None for a in attempts] == ['blind_gap', None]
-    assert '245 s of speech have no transcript line' in attempts[0]['problems'][0]['message']
+    assert [a['problems'][0]['code'] if a['problems'] else None for a in attempts] == ['stopped_early', None]
+    assert '245 s of speech after the last transcript line' in attempts[0]['problems'][0]['message']
     assert state['usage']['prompt_tokens'] == 34000 + 8500
     saved = json.loads((job_dir / 'Engine_Talk-abc.transcript.json').read_text())
     assert len(saved['segments']) == 120
@@ -261,7 +261,16 @@ HELLO = '[00:00:01] Speaker 1: Hello.'
         ),
         (answer(300, 600, HELLO, audio_tokens=1000), 'audio_tokens'),
         (answer(300, 600, HELLO, usage=(0, 100, 0), audio_tokens=0), 'no_prompt_tokens'),
-        (answer(300, 600, HELLO), 'blind_gap'),
+        (answer(300, 600, HELLO), 'stopped_early'),
+        # A passage skipped in the middle
+        (
+            answer(
+                300,
+                600,
+                '\n'.join(f'[{stamp(t)}] Speaker 1: Words.' for t in [*range(0, 100, 10), *range(200, 300, 10)]),
+            ),
+            'blind_gap',
+        ),
         (answer(300, 600, 'I cannot transcribe this.'), 'invalid_response'),
     ],
 )
