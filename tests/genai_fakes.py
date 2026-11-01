@@ -4,6 +4,8 @@ from pathlib import Path
 
 from google.genai import types
 
+API_KEY = 'test-secret-key-0123456789'
+
 DEFAULT_LINES = [
     (1, 'Speaker 1', 'Hello and welcome.'),
     (4, 'Speaker 1', 'Today we talk about engines.'),
