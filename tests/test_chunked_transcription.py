@@ -251,7 +251,14 @@ HELLO = '[00:00:01] Speaker 1: Hello.'
     [
         (answer(300, 600, HELLO, finish_reason='MAX_TOKENS'), 'output_truncated'),
         (answer(300, 600, '[00:00:01] Speaker 1: We went to the shop.\n' * 10), 'repeated_text'),
-        (answer(300, 600, '[00:20:00] Speaker 1: Late.\n[00:21:00] Speaker 1: Later.'), 'beyond_chunk'),
+        (
+            answer(
+                300,
+                600,
+                '[00:00:30] Speaker 1: Early.\n' + ''.join(f'[00:2{m}:00] Speaker 1: Late.\n' for m in range(5)),
+            ),
+            'beyond_chunk',
+        ),
         (answer(300, 600, HELLO, audio_tokens=1000), 'audio_tokens'),
         (answer(300, 600, HELLO, usage=(0, 100, 0), audio_tokens=0), 'no_prompt_tokens'),
         (answer(300, 600, HELLO), 'blind_gap'),
@@ -366,6 +373,28 @@ def test_out_of_line_timestamps_are_repaired(client, downloads_dir, genai, long_
     assert state['chunks'][0]['attempts'][0]['repaired_timestamps'] == 0
     saved = json.loads((job_dir / 'Engine_Talk-abc.transcript.json').read_text())
     assert saved['segments'][7]['start'] == 70
+
+
+def test_an_answer_written_a_minute_late_is_moved_back(client, downloads_dir, genai, long_audio):
+    job_dir = long_job(downloads_dir)
+
+    def answers(contents):
+        start, end = chunk_range(contents)
+        text = lines_for(start, end)
+        if start == 900.0:
+            text = '\n'.join(f'[{stamp(60 + t)}] Speaker 1: Words at {900 + t} here.' for t in range(0, 300, 10))
+        return answer(start, end, text)
+
+    genai.answer = answers
+
+    transcribe(client)
+
+    state = state_of(downloads_dir)
+    assert state['status'] == 'completed'
+    (attempt,) = state['chunks'][3]['attempts']
+    assert (attempt['minutes_late'], attempt['problems']) == (1, [])
+    saved = json.loads((job_dir / 'Engine_Talk-abc.transcript.json').read_text())
+    assert [s['start'] for s in saved['segments'][90:93]] == [900, 910, 920]
 
 
 def test_a_chunk_missing_subtitle_words_is_sent_again_and_flagged(client, downloads_dir, genai, long_audio):

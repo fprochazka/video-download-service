@@ -214,3 +214,19 @@ def test_subtitles_of_another_edit_of_the_video_are_ignored():
 
     assert plan.chunks[1].start == 296.0
     assert plan.chunks[1].cut.boundary is None
+
+
+@pytest.mark.parametrize(
+    ('starts', 'duration', 'late'),
+    [
+        # [00:01:01] for the first second of a 112-second chunk
+        ([61, 63, 64, 100, 164], 112, 1),
+        ([122, 130, 200, 230], 123, 2),
+        ([0, 5, 100], 112, 0),
+        # Past the end, but starting in the first minute: not late, just wrong
+        ([30, 200], 112, 0),
+        ([], 112, 0),
+    ],
+)
+def test_answers_written_whole_minutes_late(starts, duration, late):
+    assert chunking.minutes_late(starts, duration) == late

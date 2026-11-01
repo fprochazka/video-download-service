@@ -358,6 +358,24 @@ def most_repeated_line(texts) -> int:
     return max(counts.values(), default=0)
 
 
+# A chunk's timestamps may run this far past its end before they count as late
+OVERRUN_SLACK_SECONDS = 10
+
+
+def minutes_late(starts: list[int], duration: float) -> int:
+    """How many whole minutes every timestamp of a chunk's answer is late, 0 when they are not.
+
+    Gemini sometimes writes [00:01:05] for the fifth second, every line of the answer a minute or two late. The answer
+    then starts a minute or more into the chunk and runs past its end; shifted back by whole minutes, it fits.
+    """
+    if not starts or max(starts) <= duration + OVERRUN_SLACK_SECONDS:
+        return 0
+    for minutes in range(1, min(starts) // 60 + 1):
+        if max(starts) - 60 * minutes <= duration + OVERRUN_SLACK_SECONDS:
+            return minutes
+    return 0
+
+
 # How many timestamps of a chunk's answer may be out of line before the answer counts as broken instead of repaired
 MAX_REPAIRED_SHARE = 0.1
 MIN_REPAIRED_ALLOWED = 3

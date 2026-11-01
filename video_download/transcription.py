@@ -831,17 +831,20 @@ def answer_problems(
     return problems
 
 
-def repair_timestamps(transcript: ChunkTranscript, duration: float) -> tuple[ChunkTranscript, int] | None:
-    """The transcript with its few out-of-line timestamps moved between their neighbours, see chunking.repair_times;
-    None when there are too many, the checks then reject the answer"""
-    repaired = chunking.repair_times([s['start'] for s in transcript.segments], duration)
+def repair_timestamps(transcript: ChunkTranscript, duration: float) -> tuple[ChunkTranscript, int, int] | None:
+    """The transcript with its timestamps moved back when all of them are whole minutes late, and with its few
+    out-of-line timestamps moved between their neighbours, how many moved and by how many minutes all moved; None when
+    too many are out of line, the checks then reject the answer. See chunking.minutes_late and chunking.repair_times."""
+    starts = [s['start'] for s in transcript.segments]
+    late = chunking.minutes_late(starts, duration)
+    repaired = chunking.repair_times([start - 60 * late for start in starts], duration)
     if repaired is None:
         return None
     starts, moved = repaired
     segments = [s | {'start': start, 'end': start} for s, start in zip(transcript.segments, starts, strict=True)]
     for segment, following in zip(segments, segments[1:], strict=False):
         segment['end'] = max(segment['start'], following['start'])
-    return ChunkTranscript(segments, transcript.unparsed), moved
+    return ChunkTranscript(segments, transcript.unparsed), moved, late
 
 
 @dataclass
@@ -1038,7 +1041,7 @@ class ChunkedRun:
         except TranscriptionFailed as e:
             problems.append(problem(e.code, e.message))
         if transcript is not None and (repaired := repair_timestamps(transcript, part.duration)):
-            transcript, record['repaired_timestamps'] = repaired
+            transcript, record['repaired_timestamps'], record['minutes_late'] = repaired
         speech = self.speech_within(part.start, part.end)
         problems += answer_problems(response, transcript, part.duration, speech, self.context.languages)
         record['problems'] = problems

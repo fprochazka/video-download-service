@@ -337,7 +337,7 @@ Each answer is checked before it is used:
 
 - it ended with `STOP` and has `[HH:MM:SS]` lines
 - Gemini read 25 (or 32) audio tokens per second of the chunk, so it read the right audio
-- no timestamp lies past the end of the chunk, and none goes back more than 5 seconds. A few out-of-line timestamps (an hour digit in a chunk of minutes, a few lines minutes ahead) are moved between their neighbors, at most 10% of the lines
+- no timestamp lies past the end of the chunk, and none goes back more than 5 seconds. An answer whose every timestamp is a whole minute or two late (`[00:01:05]` for the fifth second), so that it starts a minute in and runs past the end, is moved back by those minutes (`minutes_late` of the attempt). A few out-of-line timestamps (an hour digit in a chunk of minutes, a few lines minutes ahead) are moved between their neighbors, at most 10% of the lines
 - no line of four or more words occurs more than three times
 - at least half of its letters are in a script of the expected languages (`wrong_script` otherwise), so a Czech or English recording that comes back in Cyrillic, Greek, Japanese or Arabic letters is sent again. The check knows the scripts of about 50 languages and skips any other
 - no stretch of more than 30 seconds of speech, as Silero found it, lies between two consecutive lines
