@@ -62,6 +62,8 @@ The frontend tests run the page script in Node.js against a stubbed DOM, pytest 
 
 The downloads directory defaults to `downloads` in the working directory and can be changed with the `DOWNLOADS_DIR` environment variable.
 
+The service checks every setting of its environment at startup. A value it cannot use, such as `DOWNLOAD_CONCURRENCY=two`, `GC_ENABLED=maybe`, a `PUBLIC_BASE_URL` that is not an absolute http(s) URL, or a `TRANSCRIPTION_PRICES` that is not valid JSON, stops the startup with one log line that names the variable and the value it expects. An unset or empty variable takes its default. The message never contains an API key.
+
 Downloads run in an in-process worker, at most `DOWNLOAD_CONCURRENCY` (default `2`) at the same time; further jobs wait as `pending`. Transcriptions have their own queue, limited by `TRANSCRIPTION_CONCURRENCY` (default `2`); the chunks of a long recording run `TRANSCRIPTION_CHUNK_CONCURRENCY` (default `4`) at a time within one transcription. The queue lives in memory: jobs still queued or running when the service stops are marked `interrupted` on the next start.
 
 Measured results of the transcription experiments, and the research behind the design, are in `docs/` at the repository root: [models](../docs/transcription-models.md), [chunking](../docs/transcription-chunking.md) and [research notes](../docs/research.md). Add a new experiment's findings there, with its date and test recordings.
@@ -332,7 +334,7 @@ The page lists both under Transcripts, with a Show button that displays the Mark
 
 For local development, export the variables in `service/` before you start uvicorn: `set -a; . ../app.env; set +a`.
 
-`TRANSCRIPTION_MODEL` selects the model, the default is `gemini-3.5-flash-lite`. `app.env` is gitignored and excluded from the Docker image. The service never logs the key.
+`TRANSCRIPTION_MODEL` selects the model, the default is `gemini-3.5-flash-lite`. Any model whose name starts with `gemini-` is accepted, also one the price table does not know; another name stops the startup. `app.env` is gitignored and excluded from the Docker image. The service never logs the key.
 
 #### Long recordings
 
@@ -344,7 +346,7 @@ A recording shorter than 7 minutes goes to Gemini in one request. A longer one i
 4. Without subtitles, the best pause is the longest one. With subtitles, the service reads the words around each pause, with their times, and picks the pause with the most points: 2 when a sentence ends before it (`.`, `?`, `!` or `…`), or 1 when the next word is capitalized and not "I", for subtitles without punctuation; 2 when a new speaker starts after it (`>>` in YouTube's captions, a leading dash in manual subtitles); 1 per second of pause up to 2; −2 when the next word starts less than 0.5 s after the cut or a subtitle word starts inside the pause; −1 per 15 seconds away from the chapter time. Subtitle words count within 0.3 s of the pause. Subtitles whose words mostly fall outside the detected speech, such as subtitles of another edit of the video, are not used. On the 91-minute interview below, the points put 15 of 21 cuts at the end of a sentence or a speaker's turn, against 12 of 22 for the longest pause.
 5. Each cut lies in the middle of a pause, so no word is cut and the chunks do not overlap. ffmpeg writes each chunk to its own file that starts at 0, and the file goes inline in the request.
 
-`TRANSCRIPTION_CHUNK_MINUTES` changes the chunk length (default `5`); the maximum and minimum are 1.4 and 0.4 times it.
+`TRANSCRIPTION_CHUNK_MINUTES` changes the chunk length (default `5`, at least `1`); the maximum and minimum are 1.4 and 0.4 times it.
 
 The chunks run in parallel, `TRANSCRIPTION_CHUNK_CONCURRENCY` (default `4`) per transcription. Each request has the title, uploader, description and the titles of the chunk's chapters as context. It also has the text of the subtitles that start inside the chunk, without their times. The model writes timestamps from the start of the chunk, and the service adds the chunk's start. Each chunk numbers its speakers on its own, so `Speaker 1` of one chunk can be `Speaker 2` of the next. The Markdown transcript says so: it has a heading per chapter and a note where a new chunk starts, or a heading per chunk without chapters.
 
@@ -377,7 +379,7 @@ On `gemini-3.5-flash-lite` a 6-minute video of dense dialogue took 11.3k input t
 
 The job page shows the estimated cost next to each transcript, for example `≈ $0.013`, and its tooltip shows the token counts and the prices used. The cost of a long recording is the sum over all its requests, the retries included, and a failed long recording shows what it cost too. Gemini reports only token counts, never an amount of money. The service multiplies the counts by a table of list prices: the standard paid tier from https://ai.google.dev/gemini-api/docs/pricing, as of 2026-10-30. Audio input and text input are priced apart where a model prices them apart, thinking tokens are priced as output, and the long-context tier of `gemini-3.1-pro-preview` applies above 200k prompt tokens. The estimate does not know about the free tier, discounts or later price changes. A model without a known price, such as `gemini-3.5-flash`, which the pricing page does not list, shows its token count only.
 
-To change a price or add a model, set `TRANSCRIPTION_PRICES` in `app.env` to a JSON object of prices in USD per million tokens, in single quotes so both Compose and a shell read it whole; it replaces the built-in prices of the models it names:
+To change a price or add a model, set `TRANSCRIPTION_PRICES` in `app.env` to a JSON object of prices in USD per million tokens, in single quotes so both Compose and a shell read it whole; it replaces the built-in prices of the models it names. A value that is not valid stops the startup:
 
 ```
 TRANSCRIPTION_PRICES='{"gemini-3.5-flash": {"input": 1.50, "output": 9.00, "as_of": "2026-11-01"}}'

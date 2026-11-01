@@ -1,11 +1,10 @@
 import json
-import logging
 from datetime import date
 
 import pytest
 
 from tests.ytdlp_fakes import read_metadata
-from video_download import pricing, storage
+from video_download import config, pricing, storage
 
 DAY = date(2026, 10, 31)
 
@@ -107,11 +106,11 @@ def test_env_replaces_and_adds_prices(monkeypatch):
 @pytest.mark.parametrize(
     'value', ['not json', '[1, 2]', '{"m": {"output": 1}}', '{"m": {"input": "x", "output": 1, "x": {}}}']
 )
-def test_invalid_env_prices_are_ignored(monkeypatch, caplog, value):
-    caplog.set_level(logging.WARNING)
+def test_invalid_env_prices_are_a_config_error(monkeypatch, value):
     monkeypatch.setenv('TRANSCRIPTION_PRICES', value)
 
-    assert usd('gemini-3.5-flash-lite') == approx((11293 * 0.30 + 4019 * 2.50) / 1e6)
+    with pytest.raises(config.ConfigError, match='^TRANSCRIPTION_PRICES is not a valid JSON object of prices'):
+        pricing.prices()
 
 
 def test_stored_usage_without_audio_count_assumes_25_tokens_per_second():

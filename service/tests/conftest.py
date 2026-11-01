@@ -10,6 +10,31 @@ from video_download.csrf import CSRF_COOKIE, CSRF_HEADER
 # PUBLIC_BASE_URL of the MCP tests
 BASE_URL = 'https://video-download.example.ts.net'
 
+# The settings the service reads from its environment; a value in the developer's environment must never reach a test
+SERVICE_ENV = (
+    'GEMINI_API_KEY',
+    'TRANSCRIPTION_MODEL',
+    'TRANSCRIPTION_PRICES',
+    'TRANSCRIPTION_CONCURRENCY',
+    'TRANSCRIPTION_CHUNK_MINUTES',
+    'TRANSCRIPTION_CHUNK_CONCURRENCY',
+    'DOWNLOAD_CONCURRENCY',
+    'PUBLIC_BASE_URL',
+    'MCP_ALLOWED_HOSTS',
+    'GC_ENABLED',
+    'GC_DRY_RUN',
+    'GC_MAX_AGE_DAYS',
+    'GC_MIN_SIZE_MB',
+    'GC_INTERVAL_HOURS',
+)
+
+
+@pytest.fixture(autouse=True)
+def clean_service_env(monkeypatch):
+    """Transcription tests set a fake key, the config tests the values they check"""
+    for name in SERVICE_ENV:
+        monkeypatch.delenv(name, raising=False)
+
 
 @pytest.fixture
 def downloads_dir(tmp_path, monkeypatch):
@@ -18,10 +43,6 @@ def downloads_dir(tmp_path, monkeypatch):
     monkeypatch.setattr(config, 'DOWNLOADS_DIR', directory)
     monkeypatch.setattr(config, 'load_user_config', lambda: ({}, {}))
     monkeypatch.setattr(yt_dlp, 'YoutubeDL', FakeYoutubeDL)
-    # A key in the developer's environment must never reach a test, transcription tests set a fake one
-    monkeypatch.delenv('GEMINI_API_KEY', raising=False)
-    monkeypatch.delenv('TRANSCRIPTION_MODEL', raising=False)
-    monkeypatch.delenv('TRANSCRIPTION_PRICES', raising=False)
     FakeYoutubeDL.behaviour = None
     FakeYoutubeDL.subtitles_behaviour = None
     FakeYoutubeDL.download_behaviour = None

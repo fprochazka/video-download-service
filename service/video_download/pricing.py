@@ -2,18 +2,17 @@
 
 Gemini's response carries token counts only, no amount of money, so the price is computed here and is an estimate: it
 uses the standard paid tier and does not know about free-tier quota, discounts or price changes after the table was
-written. TRANSCRIPTION_PRICES replaces or adds the prices of a model without a code change, see README.
+written. TRANSCRIPTION_PRICES replaces or adds the prices of a model without a code change, see README; the app checks
+it at startup and does not start with an invalid one.
 """
 
 import json
-import logging
 import math
-import os
 from dataclasses import dataclass, fields
 from datetime import date
 from functools import lru_cache
 
-logger = logging.getLogger(__name__)
+from video_download import config
 
 SOURCE = 'https://ai.google.dev/gemini-api/docs/pricing'
 # "Last updated 2026-10-30 UTC" on the pricing page, read on 2026-10-31
@@ -96,12 +95,12 @@ def parse_overrides(raw: str) -> dict[str, list[Price]]:
             ]
         return overrides
     except (ValueError, TypeError, AttributeError) as e:
-        logger.warning('Ignoring %s, it is not valid: %s', PRICES_ENV, e)
-        return {}
+        raise config.ConfigError(f'{PRICES_ENV} is not a valid JSON object of prices, see README: {e}') from None
 
 
 def prices() -> dict[str, list[Price]]:
-    raw = (os.environ.get(PRICES_ENV) or '').strip()
+    """The built-in prices with those of TRANSCRIPTION_PRICES; raises ConfigError for an invalid one"""
+    raw = config.env_value(PRICES_ENV)
     return DEFAULT_PRICES | (parse_overrides(raw) if raw else {})
 
 

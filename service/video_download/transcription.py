@@ -11,7 +11,6 @@ import html
 import json
 import logging
 import math
-import os
 import re
 import statistics
 import time
@@ -714,8 +713,6 @@ async def run_pipeline(download_id: str, download_dir: Path, media_name: str, me
 
 # --- Long recordings: chunks transcribed in parallel, each validated and retried on its own
 
-# Per job; TRANSCRIPTION_CONCURRENCY jobs can run at once
-DEFAULT_CHUNK_CONCURRENCY = 4
 # Requests that hit a rate limit, a server error or a network failure are sent again after these delays
 TRANSIENT_RETRY_DELAYS = (10, 30)
 # A chunk whose answer fails a check is sent again; when the second answer fails too, the chunk is split in two
@@ -744,13 +741,8 @@ RECALL_MARGIN = 0.10
 MIN_REFERENCE_WORDS = 100
 
 
-def chunk_concurrency() -> int:
-    return max(1, config.env_int('TRANSCRIPTION_CHUNK_CONCURRENCY', DEFAULT_CHUNK_CONCURRENCY))
-
-
 def chunk_lengths() -> chunking.Lengths:
-    minutes = float(os.environ.get('TRANSCRIPTION_CHUNK_MINUTES') or chunking.DEFAULT_TARGET_SECONDS / 60)
-    return chunking.Lengths(max(1.0, minutes) * 60)
+    return chunking.Lengths(config.chunk_minutes() * 60)
 
 
 def build_chunk_prompt(context: Context, chunk: chunking.ChunkPlan, subtitles: list[str]) -> str:
@@ -897,7 +889,7 @@ class ChunkedRun:
         self.states: list[dict] = []
         self.pieces: list[list[Piece] | None] = []
         self.warnings: list[dict] = []
-        self.semaphore = asyncio.Semaphore(chunk_concurrency())
+        self.semaphore = asyncio.Semaphore(config.chunk_concurrency())
 
     async def run(self):
         detected = await vad.detect_speech(self.audio_path, self.duration, logger)

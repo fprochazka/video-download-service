@@ -40,6 +40,12 @@ class DownloadInitResponse(BaseModel):
 
 @asynccontextmanager
 async def lifespan(fastapi_app: FastAPI):
+    try:
+        config.validate()
+    except config.ConfigError as e:
+        # One line that names the variable, before uvicorn's traceback of the failed startup
+        logger.error('The service cannot start: %s', e)
+        raise
     config.DOWNLOADS_DIR.mkdir(parents=True, exist_ok=True)
     fail_interrupted_downloads(config.DOWNLOADS_DIR)
     transcription.fail_interrupted_transcriptions(config.DOWNLOADS_DIR)
