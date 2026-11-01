@@ -152,28 +152,67 @@ def chunk_concurrency() -> int:
     return env_int('TRANSCRIPTION_CHUNK_CONCURRENCY', DEFAULT_CHUNK_CONCURRENCY)
 
 
-DEFAULT_TRANSCRIPTION_MODEL = 'gemini-3.5-flash-lite'
-# Any model of the family is accepted, a new one too; one without a known price shows its token counts only
-GEMINI_MODEL_PREFIX = 'gemini-'
+@dataclass(frozen=True)
+class ProviderInfo:
+    name: str
+    key_env: str
+    default_model: str
+    # Any model of the family is accepted, a new one too; one without a known price shows its usage only
+    model_prefix: str
+
+
+PROVIDERS = {
+    'gemini': ProviderInfo('Gemini', 'GEMINI_API_KEY', 'gemini-3.5-flash-lite', 'gemini-'),
+    'elevenlabs': ProviderInfo('ElevenLabs Scribe', 'ELEVENLABS_API_KEY', 'scribe_v2', 'scribe_'),
+}
+NO_PROVIDER = 'none'
 
 
 @dataclass(frozen=True)
 class TranscriptionSettings:
+    # None when transcription is off
+    provider: str | None
     # repr=False keeps the key out of any log line or traceback that prints the settings
     api_key: str | None = field(repr=False)
-    model: str
+    model: str | None
 
     @property
     def available(self) -> bool:
-        return bool(self.api_key)
+        return bool(self.provider and self.api_key)
+
+    @property
+    def info(self) -> ProviderInfo | None:
+        return PROVIDERS.get(self.provider or '')
 
 
 def transcription_settings() -> TranscriptionSettings:
-    """Transcription with Gemini, see README; without GEMINI_API_KEY transcription is off"""
-    model = env_value('TRANSCRIPTION_MODEL') or DEFAULT_TRANSCRIPTION_MODEL
-    if not model.startswith(GEMINI_MODEL_PREFIX):
-        raise ConfigError(f'TRANSCRIPTION_MODEL must be a Gemini model, gemini-..., it is {model!r}.')
-    return TranscriptionSettings(api_key=env_value('GEMINI_API_KEY'), model=model)
+    """The provider TRANSCRIPTION_PROVIDER selects, its key and model; see README. Unset, empty or none is off.
+
+    A missing key is not an error here, so a key removed while the service runs fails the transcription and not the
+    status page; validate() requires it at startup."""
+    value = env_value('TRANSCRIPTION_PROVIDER')
+    provider = (value or NO_PROVIDER).lower()
+    model = env_value('TRANSCRIPTION_MODEL')
+    if provider == NO_PROVIDER:
+        return TranscriptionSettings(None, None, None)
+    if provider not in PROVIDERS:
+        raise ConfigError(f'TRANSCRIPTION_PROVIDER must be {", ".join(PROVIDERS)} or {NO_PROVIDER}, it is {value!r}.')
+    info = PROVIDERS[provider]
+    model = model or info.default_model
+    if not model.startswith(info.model_prefix):
+        raise ConfigError(
+            f'TRANSCRIPTION_MODEL must be a model of {info.name}, {info.model_prefix}..., because TRANSCRIPTION_PROVIDER '
+            f'is {provider}; it is {model!r}.'
+        )
+    return TranscriptionSettings(provider, env_value(info.key_env), model)
+
+
+def require_transcription_key(settings: TranscriptionSettings):
+    if settings.provider and not settings.api_key:
+        raise ConfigError(
+            f'TRANSCRIPTION_PROVIDER is {settings.provider}, so {settings.info.key_env} must be set; set '
+            f'TRANSCRIPTION_PROVIDER={NO_PROVIDER} to run without transcription.'
+        )
 
 
 @dataclass(frozen=True)
@@ -208,6 +247,6 @@ def validate():
     transcription_concurrency()
     chunk_minutes()
     chunk_concurrency()
-    transcription_settings()
+    require_transcription_key(transcription_settings())
     gc_settings()
     pricing.prices()

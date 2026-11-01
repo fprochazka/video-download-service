@@ -1,6 +1,6 @@
 # Video download CLI
 
-A command-line interface for the [video download service](../service/README.md) through its MCP server at `/mcp`. Each tool of the server is a command: `download-video` starts a job for one video or post, `get-job` shows its state and files, and `transcribe-file` transcribes a downloaded file with Gemini.
+A command-line interface for the [video download service](../service/README.md) through its MCP server at `/mcp`. Each tool of the server is a command: `download-video` starts a job for one video or post, `get-job` shows its state and files, and `transcribe-file` transcribes a downloaded file with the service's transcription provider, Gemini or ElevenLabs Scribe.
 
 Built on [mcp-to-cli-kit](https://pypi.org/project/mcp-to-cli-kit/), which turns every MCP tool into a subcommand with typed options compiled from the tool's input schema.
 
@@ -62,7 +62,7 @@ video-download transcribe-file --download-id <download_id> --filename <media fil
 
 - `download-video` answers at once with the job, usually `pending`, because the kit's client does not use the MCP tasks extension. Repeat `get-job --wait-seconds 60` until `done` is `true`. Follow `transcribe-file` the same way.
 - The job lists every file with a plain HTTP URL that needs no authentication; download subtitles and transcripts with `curl`. The CLI cannot read the `video-download://` MCP resources the result names.
-- `transcribe-file` costs money, about $0.13 per hour of speech. The service offers it only when it has a Gemini key.
+- `transcribe-file` costs money: about $0.13 per hour of speech with Gemini, $0.22 per hour of audio with ElevenLabs Scribe. `transcribe-file --help` shows the service's provider and price. The service offers it only when a transcription provider is configured.
 - Under an AI agent, or with `--json`, the result is printed exactly as the server sent it. Otherwise, or with `--pretty`, JSON is indented.
 - Exit codes: 0 success, 1 the tool reported an error, 2 a usage or config error, 3 the service could not be reached.
 - The tool list is cached for an hour in `~/.cache/video-download/video-download.json`; `--refresh-tools` fetches it again. `-v` and `-vv` log to stderr.

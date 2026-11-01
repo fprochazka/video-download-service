@@ -9,6 +9,7 @@ import asyncio
 import logging
 import uuid
 from collections.abc import Callable
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated
 from urllib.parse import quote, unquote
@@ -22,7 +23,7 @@ from fastmcp.tools import ToolResult
 from mcp_types import ToolAnnotations
 from pydantic import BaseModel, Field
 
-from video_download import config, jobs, transcription
+from video_download import config, jobs, pricing, transcription
 from video_download.status import ExpectedSubtitle, Progress, status_response
 from video_download.storage import LOG_FILENAME, TRANSCRIPT, load_metadata
 from video_download.urls import InvalidDownloadUrl
@@ -61,14 +62,13 @@ MediaFilename = Annotated[
 
 
 def instructions(transcription: bool) -> str:
-    """The server instructions; without a Gemini key nothing mentions transcription"""
+    """The server instructions; without transcription configured nothing mentions it"""
     lines = [
-        'Downloads videos from the sites yt-dlp supports'
-        + (' and transcribes them with Gemini.' if transcription else '.'),
+        'Downloads videos from the sites yt-dlp supports' + (' and transcribes them.' if transcription else '.'),
         'Call download_video with a link to one video or post.',
         *(
             [
-                "Prefer the job's subtitle files, they come free with the download. Call transcribe_file for a Gemini "
+                "Prefer the job's subtitle files, they come free with the download. Call transcribe_file for a "
                 'transcript, which costs money, when the user asks for one, or when the subtitles are missing or look '
                 'broken (truncated, in the wrong language, garbled).'
             ]
@@ -134,12 +134,32 @@ def get_job_description(transcription: bool) -> str:
     )
 
 
-TRANSCRIBE_FILE_DESCRIPTION = """Transcribe one video or audio file of a completed job with Gemini, about $0.13 per \
-hour of speech.
-Use it when the user asks for a transcript, or when the job has no subtitle files or they look broken: truncated, in \
-the wrong language or garbled. Otherwise prefer the subtitles.
-A new transcript replaces an earlier one of the same file.
-The call answers at once, follow the transcription with get_job."""
+# Measured on the default model, see README; a price per token says little before the transcript is written
+GEMINI_PRICE_TEXT = 'about $0.13 per hour of speech'
+
+
+def transcription_price(settings: config.TranscriptionSettings) -> str | None:
+    """What a transcription costs with the configured model, None when the service cannot tell"""
+    if settings.provider == 'gemini':
+        return GEMINI_PRICE_TEXT if settings.model == config.PROVIDERS['gemini'].default_model else None
+    price = pricing.price_of(settings.model, datetime.now(UTC).date())
+    if price is not None and price.per_hour is not None:
+        return f'${price.per_hour:.2f} per hour of audio'
+    return None
+
+
+def transcribe_file_description(settings: config.TranscriptionSettings) -> str:
+    price = transcription_price(settings)
+    return '\n'.join(
+        [
+            f'Transcribe one video or audio file of a completed job with {settings.info.name}'
+            + (f', {price}.' if price else ', which costs money.'),
+            'Use it when the user asks for a transcript, or when the job has no subtitle files or they look broken: '
+            'truncated, in the wrong language or garbled. Otherwise prefer the subtitles.',
+            'A new transcript replaces an earlier one of the same file.',
+            'The call answers at once, follow the transcription with get_job.',
+        ]
+    )
 
 
 def resource_uri(download_id: str, *parts: str) -> str:
@@ -232,7 +252,7 @@ class JobTranscription(BaseModel):
     error: str | None
     error_code: str | None
     warnings: list[str]
-    cost_usd: float | None = Field(description='estimated from the token usage and list prices')
+    cost_usd: float | None = Field(description='estimated from the usage and list prices')
     cost_estimated: bool | None
     files: list[str]
     transcript_resource_uri: str | None
@@ -442,13 +462,14 @@ def read_job_file(download_id: str, name: str) -> Path:
     return path
 
 
-def create_server(get_worker: Callable[[], JobWorker], transcription_available: bool) -> FastMCP:
+def create_server(get_worker: Callable[[], JobWorker], settings: config.TranscriptionSettings) -> FastMCP:
     """The MCP server; get_worker returns the app's job worker, which the app's lifespan starts.
 
     Downloading and transcribing are always two steps: download_video, then transcribe_file when the user asks for a
-    transcript or the subtitles are missing or broken. Without transcription_available (no GEMINI_API_KEY) there is no transcribe_file tool
-    and no description mentions transcription, so an agent never sees an option that cannot work.
+    transcript or the subtitles are missing or broken. Without transcription configured there is no transcribe_file
+    tool and no description mentions transcription, so an agent never sees an option that cannot work.
     """
+    transcription_available = settings.available
     server = FastMCP('video-download', instructions=instructions(transcription_available))
 
     @server.tool(
@@ -483,7 +504,7 @@ def create_server(get_worker: Callable[[], JobWorker], transcription_available: 
 
         @server.tool(
             title='Transcribe a downloaded file',
-            description=TRANSCRIBE_FILE_DESCRIPTION,
+            description=transcribe_file_description(settings),
             output_schema=JOB_SCHEMA,
             annotations=ToolAnnotations(read_only_hint=False, destructive_hint=False, open_world_hint=True),
         )

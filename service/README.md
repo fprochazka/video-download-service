@@ -21,7 +21,7 @@ A simple web service for downloading videos from various platforms using yt-dlp 
   - `downloading` - Video being downloaded
   - `completed` - At least one media file was downloaded
   - `failed` - Error occurred, or yt-dlp finished without a media file (details in `error`, `error_code`, `error_type`)
-- **Transcription** - A Transcribe button on each media file sends its audio to Google Gemini and adds a Markdown and a JSON transcript with timestamps and speaker labels to the job; recordings from 7 minutes are cut into chunks at chapters and pauses, see [Transcription](#transcription)
+- **Transcription** - A Transcribe button on each media file sends its audio to Google Gemini or ElevenLabs Scribe and adds a Markdown and a JSON transcript with timestamps and speaker labels to the job, see [Transcription](#transcription)
 - **MCP server** - Agents such as Claude Code download and transcribe videos through the `/mcp` endpoint, see [MCP server](#mcp-server)
 - **Cleanup of old media** - Media files over 5 MB are deleted 90 days after their job finished, the job page and its subtitles and details stay, see [Garbage collection](#garbage-collection)
 - **Restart safety** - Downloads that were running when the service stopped are marked `failed` with `error_code` `interrupted` on the next start
@@ -315,30 +315,60 @@ Some options are owned by the service and always override `YTDLP_OPTS`: `ignoree
 
 ### Transcription
 
-The job page has a Transcribe button on each media file of a completed job. The service then extracts the audio with ffmpeg, sends it to the Gemini Developer API, and stores the transcript next to the media as two files:
+The job page has a Transcribe button on each media file of a completed job. The service then extracts the audio with ffmpeg as 16 kHz mono Opus, sends it to the transcription provider, and stores the transcript next to the media:
 
-- `<media name>.transcript.md` - the title, then one paragraph per speaker turn, for example `**[01:05] Speaker 1:** text`. A recording of 7 minutes or more also gets a heading per chapter, see [Long recordings](#long-recordings)
-- `<media name>.transcript.json` - the segments (`start` and `end` in whole seconds, `speaker`, `text`), the model, the token usage and the warnings. Gemini gives only the start of each segment, so a segment's `end` is the start of the next one
+- `<media name>.transcript.md` - the title, then one paragraph per speaker turn, for example `**[01:05] Speaker 1:** text`, with a heading per chapter of the video where the transcript knows the chapters
+- `<media name>.transcript.json` - the segments (`start` and `end` in seconds, `speaker`, `text`), the `provider`, the model, the usage and the warnings
+- `<media name>.transcript.words.json` - ElevenLabs only: its answer as it came, every word with its time, speaker and confidence
 
-The page lists both under Transcripts, with a Show button that displays the Markdown text. Transcribing a file again replaces both files. A 6-minute video takes about 10 seconds to transcribe, a 90-minute one about 4 minutes.
+The page lists them under Transcripts, with a Show button that displays the Markdown text. Transcribing a file again replaces the transcript.
+
+#### Providers
+
+`TRANSCRIPTION_PROVIDER` selects one provider for the whole service: `gemini`, `elevenlabs`, or `none`. Unset or empty is the same as `none`: the service starts without any key, the Transcribe button is disabled, `/status` returns `transcription_available: false`, and the MCP server has no `transcribe_file` tool. The selected provider needs its key, `GEMINI_API_KEY` or `ELEVENLABS_API_KEY`; without it the service does not start. A key of the other provider may stay in `app.env`, the service ignores it. To switch, change `TRANSCRIPTION_PROVIDER` and restart the service; transcripts made earlier stay.
+
+An existing deployment that only had `GEMINI_API_KEY` set must add `TRANSCRIPTION_PROVIDER=gemini`, otherwise transcription is off.
+
+- **Gemini** (`gemini-3.5-flash-lite` by default): about $0.13 per hour of speech. It reads the video's title, description and subtitles as context, so it spells names well. Its timestamps are approximate, a few seconds off, and a recording of 7 minutes or more goes in chunks whose speaker numbers start again in each chunk, see [Long recordings](#long-recordings).
+- **ElevenLabs Scribe** (`scribe_v2`): $0.22 per hour of audio, on every plan. The whole recording goes in one request, its word timestamps are within a fraction of a second, and one person keeps one speaker number for the whole file. It writes the speech more verbatim, with fillers, false starts and cut-off words, and takes no context, see [ElevenLabs Scribe](#elevenlabs-scribe).
+
+On a 91-minute English interview both covered about 98% of the words of YouTube's captions; on a 64-minute Czech one Gemini covered 95.5% and Scribe 93.6%. The measurements are in [docs/transcription-models.md](../docs/transcription-models.md#elevenlabs-scribe-v2-on-whole-recordings).
+
+`TRANSCRIPTION_MODEL` selects the model of the provider. Unset, it is the provider's default. A Gemini model must start with `gemini-` and a Scribe model with `scribe_`; any such name is accepted, also one the price table does not know, and its transcripts show their usage without a price. A model of the other provider stops the startup.
 
 #### Setup
 
-1. Create an API key at https://aistudio.google.com/apikey, in a Google Cloud project with billing enabled. On the free tier Google may use the audio for training, and its terms allow only paid services for apps that serve users in the EEA.
-2. Copy the example settings in the repository root and put the key in `GEMINI_API_KEY`:
+1. Create an API key:
+   - Gemini: at https://aistudio.google.com/apikey, in a Google Cloud project with billing enabled. On the free tier Google may use the audio for training, and its terms allow only paid services for apps that serve users in the EEA.
+   - ElevenLabs: at https://elevenlabs.io/app/settings/api-keys, with access to Speech to Text.
+2. Copy the example settings in the repository root, then set `TRANSCRIPTION_PROVIDER` and the provider's key:
    ```bash
    cp app.env.example app.env
    chmod 600 app.env
    ```
-3. Restart the service: `docker-compose up -d`. Compose reads `app.env` into the app container; without the file the service starts with transcription off, and the Transcribe button is disabled.
+3. Restart the service: `docker-compose up -d`. Compose reads `app.env` into the app container; without the file the service starts with transcription off.
 
 For local development, export the variables in `service/` before you start uvicorn: `set -a; . ../app.env; set +a`.
 
-`TRANSCRIPTION_MODEL` selects the model, the default is `gemini-3.5-flash-lite`. Any model whose name starts with `gemini-` is accepted, also one the price table does not know; another name stops the startup. `app.env` is gitignored and excluded from the Docker image. The service never logs the key.
+`app.env` is gitignored and excluded from the Docker image. The service never logs a key.
+
+#### ElevenLabs Scribe
+
+The service sends the whole recording in one `POST https://api.elevenlabs.io/v1/speech-to-text` with `model_id=scribe_v2`, `diarize=true`, `timestamps_granularity=word` and `tag_audio_events=true`. Scribe answered a 6-minute video in 14 seconds, 91 minutes in 64 seconds and 64 minutes in 3 minutes; the service waits up to 30 minutes.
+
+- **Language.** When the recording is expected in exactly one language (see [What the service sends to Google](#what-the-service-sends-to-google) for where the expected languages come from), the request has it as `language_code`, for example `en`. Otherwise Scribe detects the language. The `.transcript.json` records the language Scribe heard (`eng`, `ces`) and its `language_probability`.
+- **Segments and speakers.** A segment is one sentence of one speaker, cut after 30 seconds at the latest. Scribe's speaker ids become `Speaker 1`, `Speaker 2` in the order they first speak. Audio events stay in the text where they happen, in the recording's language: `[laughs]`, `[smích]`. A paragraph of the Markdown is one speaker's turn, cut at a sentence end after a minute.
+- **Interjections.** A turn of at most 2 words and under 1.5 seconds, between two turns of one other speaker of at least 10 words each, goes into that speaker's paragraph in parentheses: `... kick your ass. (Speaker 2: Mm-hmm.) And I wanna be ...`. A question, or the answer to one, stays a turn of its own. The segment keeps its speaker and has `backchannel: true` in the `.transcript.json`. On the 91-minute interview this folds 96 turns, most of them "Mm-hmm" and "Yeah"; on a 6-minute comedy dialogue 4.
+- **Numbers.** Scribe writes numbers as words, and its API has no option for digits. In an English transcript the service writes them in digits with [text2num](https://github.com/allo-media/text2num): "two thousand and twenty two" becomes 2022, "fifteen thousand dollars" 15,000 dollars, "five million" 5 million. "a few million" and "a hundred" stay as words, and a lone small number such as "two friends" often stays too. text2num has no Czech, so a Czech transcript keeps its numbers as words. The words file keeps Scribe's text.
+- **Limits.** One request takes at most 10 hours of audio. A longer recording fails with `too_long` before anything is sent; the service does not split it. The 3 GB file limit cannot be reached, an hour of the extracted audio is about 11 MB.
+- **Retries.** An HTTP 429, a 5xx or a failed connection is sent again after 10 and after 30 seconds. A request that timed out is not, because the audio may have been transcribed and billed already.
+- **Checks.** The transcript gets the warnings every transcript gets, see [Limits](#limits), and `wrong_script` when fewer than half of its letters are in a script of the expected languages.
+
+The service does not send `keyterms` (20% more per hour), `no_verbatim`, which would drop the fillers and false starts, or `num_speakers`.
 
 #### Long recordings
 
-A recording shorter than 7 minutes goes to Gemini in one request. A longer one is cut into chunks of about 5 minutes, and each chunk is one request:
+This section is about Gemini. A recording shorter than 7 minutes goes to Gemini in one request. A longer one is cut into chunks of about 5 minutes, and each chunk is one request:
 
 1. Silero VAD (the `pysilero-vad` package) finds the speech in the audio. If it fails, ffmpeg's `silencedetect` (−35 dB for 0.4 s) finds the silences instead; it hears music as speech, so it finds fewer pauses. If that fails too, the cuts are hard cuts at fixed times.
 2. With chapters in the video's `info.json`, the chunks follow them. Consecutive chapters are merged while the chunk stays within 5 minutes, and a chunk shorter than 2 minutes takes the next chapter even when that makes it longer. A chapter longer than 7 minutes is split like a recording without chapters. Chapter times are typed by hand, so each cut moves to the best pause of at least 0.3 s within 15 seconds of the chapter time, then within 45 seconds. Without a pause there, the cut is a hard cut at the chapter time.
@@ -377,15 +407,17 @@ On the 91-minute interview the chunking was tuned on (an English podcast with 33
 
 On `gemini-3.5-flash-lite` a 6-minute video of dense dialogue took 11.3k input tokens (8.9k of them audio, 25 tokens per second) and 4.0k output tokens. At the list price of $0.30 per million input and $2.50 per million output tokens that is $0.013, about $0.13 per hour of speech. The output is most of the bill, so a recording with less speech costs less. A long recording costs about $0.15 per hour: each chunk repeats the description in its prompt, and a chunk sent again is paid again.
 
-The job page shows the estimated cost next to each transcript, for example `≈ $0.013`, and its tooltip shows the token counts and the prices used. The cost of a long recording is the sum over all its requests, the retries included, and a failed long recording shows what it cost too. Gemini reports only token counts, never an amount of money. The service multiplies the counts by a table of list prices: the standard paid tier from https://ai.google.dev/gemini-api/docs/pricing, as of 2026-10-30. Audio input and text input are priced apart where a model prices them apart, thinking tokens are priced as output, and the long-context tier of `gemini-3.1-pro-preview` applies above 200k prompt tokens. The estimate does not know about the free tier, discounts or later price changes. A model without a known price, such as `gemini-3.5-flash`, which the pricing page does not list, shows its token count only.
+ElevenLabs Scribe costs $0.22 per hour of audio on every plan, from https://elevenlabs.io/pricing/api as read on 2026-11-01. The service prices the `audio_duration_secs` of the answer, every started second, so the 6-minute video above cost $0.022. A plan's included hours are not taken into account.
 
-To change a price or add a model, set `TRANSCRIPTION_PRICES` in `app.env` to a JSON object of prices in USD per million tokens, in single quotes so both Compose and a shell read it whole; it replaces the built-in prices of the models it names. A value that is not valid stops the startup:
+The job page shows the estimated cost next to each transcript, for example `≈ $0.013`, and its tooltip shows the token counts, or the seconds of audio, and the prices used. The cost of a long recording is the sum over all its requests, the retries included, and a failed long recording shows what it cost too. Gemini reports only token counts, never an amount of money. The service multiplies the counts by a table of list prices: the standard paid tier from https://ai.google.dev/gemini-api/docs/pricing, as of 2026-10-30. Audio input and text input are priced apart where a model prices them apart, thinking tokens are priced as output, and the long-context tier of `gemini-3.1-pro-preview` applies above 200k prompt tokens. The estimate does not know about the free tier, discounts or later price changes. A model without a known price, such as `gemini-3.5-flash`, which the pricing page does not list, shows its token count only.
+
+To change a price or add a model, set `TRANSCRIPTION_PRICES` in `app.env` to a JSON object of prices in USD per million tokens, or per hour of audio, in single quotes so both Compose and a shell read it whole; it replaces the built-in prices of the models it names. A value that is not valid stops the startup:
 
 ```
-TRANSCRIPTION_PRICES='{"gemini-3.5-flash": {"input": 1.50, "output": 9.00, "as_of": "2026-11-01"}}'
+TRANSCRIPTION_PRICES='{"gemini-3.5-flash": {"input": 1.50, "output": 9.00, "as_of": "2026-11-01"}, "scribe_v2": {"per_hour": 0.22}}'
 ```
 
-Each model takes `input` and `output`, and optionally `input_audio` (when audio input costs more than text), `long_context_tokens` with `input_long` and `output_long`, and `as_of`. For an announced price change, give a list of such objects and add `valid_from` (an ISO date) to the later one. A transcription uses the price that applied on the day it ran. Transcriptions made before the cost was recorded get an estimate in `/status` from their stored usage; their usage has no audio count, so the service assumes 25 audio tokens per second of the media.
+A model priced by the hour takes `per_hour`. A model priced by tokens takes `input` and `output`, and optionally `input_audio` (when audio input costs more than text), `long_context_tokens` with `input_long` and `output_long`, and `as_of`. For an announced price change, give a list of such objects and add `valid_from` (an ISO date) to the later one. A transcription uses the price that applied on the day it ran. Transcriptions made before the cost was recorded get an estimate in `/status` from their stored usage; their usage has no audio count, so the service assumes 25 audio tokens per second of the media.
 
 The default comes from a comparison on that video, scored against its manual subtitles:
 
@@ -395,6 +427,8 @@ The default comes from a comparison on that video, scored against its manual sub
 
 #### What the service sends to Google
 
+This section is about Gemini. ElevenLabs gets the audio and, when the recording is expected in one language, its code; nothing else of the video.
+
 - the audio of the media file, mono 16 kHz Opus. A recording under 7 minutes is uploaded to the Files API and deleted right after the request; the chunks of a longer one go inline in their requests
 - the title, uploader, channel, description and chapters of the video
 - the expected languages of the speech: the `language` of `info.json`, of YouTube's speech recognition track and of manual subtitle tracks, not of machine translations. The system instruction names them and tells the model to write each language as spoken, never translated or transliterated, with its diacritics. The same sentence at the start of the prompt made Gemini write every timestamp of one chunk a minute late, in 5 of 5 answers
@@ -403,6 +437,8 @@ The default comes from a comparison on that video, scored against its manual sub
 The video's own text goes into the prompt in tagged blocks with `<`, `>` and `&` escaped, and the instructions tell the model to treat it as data. A description that contains instructions therefore cannot end its block, but a model can still be influenced by text it reads.
 
 #### Limits
+
+The first six are limits of Gemini:
 
 - Timestamps come from the model and can drift; they are approximate.
 - Speaker labels are `Speaker 1`, `Speaker 2` unless the audio or the description names the speaker. In a long recording they start again in each chunk.
@@ -421,15 +457,18 @@ The service checks the result and stores warnings in `warnings`; they do not fai
 - `no_speech` - the transcript is empty
 - `unparsed_lines` - lines of the answer that were not `[HH:MM:SS]` transcript lines, left out
 - `chunk_suspect` - a chunk of a long recording has much less text than the others even after it was sent again, see [Long recordings](#long-recordings)
+- `wrong_script` - ElevenLabs: fewer than half of the letters are in a script of the expected languages, so Scribe may have heard another language
 
 A failed transcription has an `error` and one of these `error_code` values:
 
-- `not_configured` - `GEMINI_API_KEY` is not set
-- `rate_limited` - Gemini answered HTTP 429, try again later
-- `provider_error` - another Gemini API error, or an answer that ended without a reason Gemini documents as complete
+- `not_configured` - `TRANSCRIPTION_PROVIDER` or its key is not set, or ElevenLabs rejected the key (HTTP 401)
+- `rate_limited` - the provider answered HTTP 429 three times, try again later
+- `provider_error` - another API error, a network failure, an ElevenLabs request that ran out of its 30 minutes, or a Gemini answer that ended without a reason Gemini documents as complete
+- `too_long` - the recording is longer than ElevenLabs takes in one request, 10 hours
+- `insufficient_credits` - the ElevenLabs account has no credits left (HTTP 402)
 - `output_truncated` - the answer hit the output token limit; a cut-off transcript is never stored
 - `blocked` - Gemini's safety or recitation filter stopped the answer
-- `invalid_response` - the answer had no `[HH:MM:SS]` transcript line
+- `invalid_response` - the Gemini answer had no `[HH:MM:SS]` transcript line, or the ElevenLabs answer was not JSON with words
 - `chunk_failed` - a chunk of a long recording had no answer that passed the checks, even after it was split; the error names the chunk and its time range
 - `audio_extraction_failed` - ffmpeg could not read the audio
 - `media_missing` - the media file was deleted before the transcription started
@@ -452,9 +491,9 @@ Tools:
 
 - `download_video(url)` - starts a job for a link to one video or one post, with the same URL rules as the web form: a link to a playlist, channel, profile or other collection is a tool error. It never transcribes: downloading and transcribing are always two steps, so the agent reads the subtitles that come free with the download before it pays for a transcript. A client without task support gets the job at once; see [MCP tasks](#mcp-tasks) for the others.
 - `get_job(download_id, wait_seconds=0)` - the job's state, the video details (title, duration, uploader, thumbnail and the others of `metadata.json`), the download `progress` while it runs, the error and `error_code` of a failed job, the files with their kind, size and URL, and each transcription with its state and estimated cost. With `wait_seconds` (0 to 60) the tool answers once the job changes or ends, so an agent needs fewer calls. A change of the progress alone does not end the wait.
-- `transcribe_file(download_id, filename)` - transcribes one media file of a completed job, with the same rules as the Transcribe button. It replaces an earlier transcript of the file. The agent is told to prefer the subtitles and to call it when the user asks for a transcript, or when the job has no subtitles or they look broken: truncated, in the wrong language or garbled.
+- `transcribe_file(download_id, filename)` - transcribes one media file of a completed job, with the same rules as the Transcribe button. It replaces an earlier transcript of the file. Its description names the provider and its price, for example `with ElevenLabs Scribe, $0.22 per hour of audio`. The agent is told to prefer the subtitles and to call it when the user asks for a transcript, or when the job has no subtitles or they look broken: truncated, in the wrong language or garbled.
 
-Without `GEMINI_API_KEY` the server offers no transcription: there is no `transcribe_file` tool, and neither the descriptions nor the server instructions mention transcription. The service reads the key once at startup, so a change takes a restart. The transcripts resource stays, for transcripts made earlier.
+Without a transcription provider the server offers no transcription: there is no `transcribe_file` tool, and neither the descriptions nor the server instructions mention transcription. The service reads the key once at startup, so a change takes a restart. The transcripts resource stays, for transcripts made earlier.
 
 Each tool advertises the shape of its structured content as an `outputSchema`; all three return the same job object.
 
@@ -475,7 +514,7 @@ A client that supports the MCP tasks extension (`io.modelcontextprotocol/tasks`,
 - The task ID is the job's `download_id`. `tasks/get` reads the job's `metadata.json`, so a task survives a restart of the service. A job the restart interrupted ends its task with `error_code` `interrupted`.
 - While the job runs, the task is `working`, and its `statusMessage` is the job's state, for example `queued`, `downloading 42%`, `downloading 42% (video 1/2)` or `downloading, merging`. The task asks the client to poll every 5 seconds, and its `ttlMs` is null, because the service never deletes a job's metadata.
 - When the job ends, the task is `completed`, with the result that `get_job` returns. The result of a failed job has `isError: true` and the job's `error` and `error_code`. The task status stays `completed` because the extension reserves `failed` for protocol errors.
-- `tasks/cancel` is acknowledged, but it does not stop the job, because yt-dlp and Gemini cannot be stopped in the middle of a request. The task's `statusMessage` then says that the job keeps running.
+- `tasks/cancel` is acknowledged, but it does not stop the job, because yt-dlp and the transcription provider cannot be stopped in the middle of a request. The task's `statusMessage` then says that the job keeps running.
 
 ### Garbage collection
 
@@ -514,6 +553,7 @@ service/
 │   ├── transcription.py # Transcription pipeline: prompt, answer parsing, checks, chunks, transcript files
 │   ├── chunking.py      # Where a long recording is cut, and the measures that validate a chunk
 │   ├── gemini.py        # Gemini Developer API calls (Files API upload or inline audio, generate_content)
+│   ├── elevenlabs.py    # ElevenLabs speech-to-text call, its words as segments, interjections, numbers
 │   ├── pricing.py       # List prices and the estimated cost of a transcription
 │   ├── audio.py         # ffmpeg audio extraction and ffprobe duration
 │   ├── vad.py           # Speech and pauses of a recording, from Silero VAD or ffmpeg silencedetect
@@ -566,7 +606,7 @@ service/
   - Deleting a media file keeps its transcripts
 - `POST /downloads/{download_id}/{filename}/transcribe` - Queue a transcription of one media file, requires the CSRF token
   - Returns HTTP 202 with the job's status, the file's entry in `transcriptions` is `pending`
-  - 404 for an unknown job or a file that is not a media artifact, 409 when the job is not `completed` or the file already has a transcription `pending` or `running`, 503 with `{"detail": "...", "error_code": "not_configured"}` without `GEMINI_API_KEY`
+  - 404 for an unknown job or a file that is not a media artifact, 409 when the job is not `completed` or the file already has a transcription `pending` or `running`, 503 with `{"detail": "...", "error_code": "not_configured"}` without a transcription provider and its key
 
 - `POST /mcp` - The MCP server, see [MCP server](#mcp-server); no CSRF token
 
@@ -660,7 +700,7 @@ The video details (`title` to `resolution`, `filesize_approx`, `chapters_count` 
 
 `files` lists only the media; `artifacts` lists every downloadable file of the job with its `kind` (`media`, `subtitle`, `info`, `transcript`). A transcript names its media file in `media`. For a subtitle, `lang` is yt-dlp's track key (`en`, `en-GB`, `cs-orig`) and `auto` is `true` for automatic captions. `deleted_files` keeps a record of every file removed from `artifacts`; `reason` is `user` for the delete button and `gc` for the [garbage collection](#garbage-collection), which also records leftover partial downloads with `kind` `partial`. Jobs created before artifacts existed have no `artifacts` and no `completed_at`; `/status` lists their media files as artifacts.
 
-`transcriptions` holds one entry per media file that was ever transcribed, keyed by the media file name; `status` is `pending`, `running`, `completed` or `failed`, see [Transcription](#transcription) for the warnings and error codes. `cost` is the estimate described under [Cost](#cost), `null` for a model without a known price. `/status` also returns `transcription_available`, `true` when the server has a Gemini API key.
+`transcriptions` holds one entry per media file that was ever transcribed, keyed by the media file name; `status` is `pending`, `running`, `completed` or `failed`, see [Transcription](#transcription) for the warnings and error codes. `cost` is the estimate described under [Cost](#cost), `null` for a model without a known price. `/status` also returns `transcription_available`, `true` when the server has a transcription provider and its key. Each entry names its `provider`; for ElevenLabs, `usage` has `audio_seconds` and `cost.prices` has `per_hour` in place of the token counts and token prices.
 
 YouTube jobs also carry `used_youtube_cookies` (`true` when the retry with `youtube_cookies.txt` ran).
 
@@ -692,6 +732,8 @@ YouTube jobs also carry `used_youtube_cookies` (`true` when the retry with `yout
 - **FastAPI** - Web framework
 - **yt-dlp** - Video download library
 - **google-genai** - Gemini Developer API client for transcription
+- **httpx** - HTTP client of the ElevenLabs speech-to-text API
+- **text2num** - English numbers written as words in digits, in ElevenLabs transcripts
 - **Uvicorn** - ASGI server
 - **HTML/CSS/JavaScript** - Frontend with polling
 - **Python asyncio** - The job worker, queues with a concurrency limit each

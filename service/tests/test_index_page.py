@@ -179,7 +179,7 @@ def test_refused_delete_tells_the_user(page_script):
     assert len(result['rows']) == 5
 
 
-UNAVAILABLE = 'Transcription is not configured on the server (GEMINI_API_KEY, see README)'
+UNAVAILABLE = 'Transcription is not configured on the server (TRANSCRIPTION_PROVIDER, see README)'
 EVIL = '&quot;&gt;&lt;img src=x onerror=alert(1)&gt;.mp4'
 
 
@@ -217,7 +217,7 @@ def test_failed_transcription_shows_the_error_escaped_with_a_hint_and_what_it_co
     (state,) = result['transcriptions']
     assert state == (
         'Transcription failed: Gemini API error 429 &lt;RESOURCE_EXHAUSTED&gt;|≈ $0.0008|'
-        '||Gemini is rate-limiting the API key, try again in a minute.|'
+        '||The transcription provider is rate-limiting the API key, try again in a minute.|'
     )
     assert transcribe_buttons(result)[0] == {
         'text': 'Transcribe',
@@ -294,3 +294,17 @@ def test_completed_transcription_shows_its_estimated_cost(page_script):
         },
     ]
     assert '<b>model' not in result['html']
+
+
+def test_a_transcription_priced_per_hour_shows_the_length_of_its_audio(page_script):
+    result = run_scenario(page_script, 'transcription-costs-per-hour')
+
+    assert result['costs'] == [
+        {
+            'text': '≈ $0.022',
+            'title': '357 s of audio. Estimated with the list price of scribe_v2 as of 2026-11-01: 0.22 USD per hour of '
+            'audio.',
+        },
+        {'text': '357 s of audio', 'title': 'No price is known for scribe_&lt;b&gt;v9&lt;/b&gt;. 357 s of audio'},
+    ]
+    assert '<b>v9' not in result['html']

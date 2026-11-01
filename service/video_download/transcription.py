@@ -1,9 +1,12 @@
-"""Transcription of a job's media file with Gemini: the pipeline, its state in metadata, and the transcript files.
+"""Transcription of a job's media file: the pipeline, its state in metadata, and the transcript files.
 
-The pipeline: ffmpeg extracts the audio, a recording under 7 minutes goes to Gemini in one request with the video's
-details and subtitles as context, the segments are checked against the media's duration and the subtitles, and the
-transcript is written next to the media. A longer recording is cut into chunks at chapters and pauses (see chunking),
-the chunks are sent in parallel, each one validated and retried on its own, and their segments joined.
+The pipeline: ffmpeg extracts the audio, the provider TRANSCRIPTION_PROVIDER selects transcribes it, the segments are
+checked against the media's duration and the subtitles, and the transcript is written next to the media.
+
+With Gemini, a recording under 7 minutes goes in one request with the video's details and subtitles as context. A
+longer recording is cut into chunks at chapters and pauses (see chunking), the chunks are sent in parallel, each one
+validated and retried on its own, and their segments joined. ElevenLabs Scribe takes the whole recording in one
+request, see elevenlabs.
 """
 
 import asyncio
@@ -20,7 +23,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Protocol
 
-from video_download import audio, chunking, config, gemini, languages, pricing, storage, vad
+from video_download import audio, chunking, config, elevenlabs, gemini, languages, pricing, storage, vad
 from video_download.gemini import ProviderError, ProviderResponse, TranscriptionRequest, Usage
 from video_download.storage import (
     INFO_FILENAME,
@@ -43,6 +46,8 @@ ACTIVE_TRANSCRIPTION_STATUSES = ('pending', 'running')
 
 TRANSCRIPT_MD_SUFFIX = '.transcript.md'
 TRANSCRIPT_JSON_SUFFIX = '.transcript.json'
+# ElevenLabs' answer as it came, with every word, its time and speaker
+TRANSCRIPT_WORDS_SUFFIX = '.transcript.words.json'
 # Hidden, so it is never mistaken for a job file; the startup sweep removes the ones a crash left behind
 AUDIO_TEMP_GLOB = '.*.transcribe-*.' + audio.AUDIO_EXTENSION
 
@@ -64,7 +69,7 @@ MAX_SPEAKER_CHARS = 80
 MAX_SEGMENT_CHARS = 2000
 
 ERROR_MESSAGES = {
-    'not_configured': 'Transcription is not configured, set GEMINI_API_KEY.',
+    'not_configured': 'Transcription is not configured, set TRANSCRIPTION_PROVIDER and its API key.',
     'media_missing': 'The media file is gone, it was deleted.',
     'interrupted': 'The transcription was interrupted by a service restart, please try again.',
 }
@@ -423,10 +428,16 @@ CHAPTER_HEADING_SLACK_SECONDS = 2
 
 def render_markdown(title: str | None, media_name: str, transcript: dict, duration: float) -> str:
     """A transcript in chunks gets a heading per chapter, or per chunk without chapters, and a note where the speaker
-    numbers start again"""
+    numbers start again. A segment marked backchannel, a short interjection between two turns of another speaker, goes
+    in parentheses into that speaker's paragraph."""
     long_media = duration >= 3600
     heading = ' '.join((title or media_name).split())
-    intro = f'Transcribed from {media_name} by {transcript["model"]}. Timestamps are approximate.'
+    if transcript.get('provider') == 'elevenlabs':
+        intro = f'Transcribed from {media_name} by ElevenLabs {transcript["model"]}.'
+    else:
+        intro = f'Transcribed from {media_name} by {transcript["model"]}. Timestamps are approximate.'
+    if any(segment.get('backchannel') for segment in transcript['segments']):
+        intro += " Short interjections of another speaker are in parentheses in the speaker's paragraph."
     chunks = transcript.get('chunks') or []
     chapters = sorted((c['start'], ' '.join(c['title'].split())) for c in transcript.get('chapters') or [])
     if len(chunks) > 1:
@@ -459,6 +470,9 @@ def render_markdown(title: str | None, media_name: str, transcript: dict, durati
             elif chunk:
                 headings.append(f'*{part}, the speaker numbers start again.*')
         speaker = ' '.join(segment['speaker'].split()) or 'Speaker'
+        if segment.get('backchannel') and paragraph and not headings:
+            paragraph.append(f'({speaker}: {text})')
+            continue
         if headings or speaker != paragraph_speaker or start - paragraph_start >= PARAGRAPH_SECONDS:
             flush()
             for line in headings:
@@ -672,6 +686,8 @@ class TranscriberResult:
     fields: dict = field(default_factory=dict)
     # Whether to warn about repeated lines; see sanity_warnings
     check_repeats: bool = True
+    # More files the transcriber wrote next to the media, registered with the transcript
+    files: list[str] = field(default_factory=list)
 
 
 class Transcriber(Protocol):
@@ -698,7 +714,7 @@ class GeminiTranscriber:
             # Each request is priced on its own, the long-context tier of a model applies per request
             request_usages = [asdict(usage)]
             warnings = []
-            fields = {}
+            fields = {'provider': 'gemini'}
         else:
             chunked = ChunkedRun(
                 self.provider,
@@ -714,6 +730,7 @@ class GeminiTranscriber:
             usage = Usage(**{key: sum(u[key] for u in request_usages) for key in asdict(Usage())})
             warnings = chunked.warnings
             fields = {
+                'provider': 'gemini',
                 'speech_detection': chunked.speech_source,
                 'chapters': [{'start': start, 'title': title} for start, title in chunked.plan.chapters],
                 'chunks': chunked.chunk_summaries(),
@@ -729,8 +746,98 @@ class GeminiTranscriber:
         return TranscriberResult(segments, asdict(usage), cost, warnings, fields, check_repeats='chunks' not in fields)
 
 
+class ElevenLabsTranscriber:
+    """The whole recording in one request, its words in sentences of one speaker; no chunks and no retries of a
+    complete answer, Scribe's timestamps and speakers hold for the whole file"""
+
+    def __init__(self, client: elevenlabs.ElevenLabsClient):
+        self.client = client
+        self.model = client.model
+
+    async def transcribe(self, recording: Recording) -> TranscriberResult:
+        if recording.duration > elevenlabs.MAX_AUDIO_SECONDS:
+            raise TranscriptionFailed(
+                'too_long',
+                f'The recording is {format_timestamp(recording.duration)} long, ElevenLabs Scribe takes at most '
+                f'{format_timestamp(elevenlabs.MAX_AUDIO_SECONDS)} in one request.',
+            )
+        expected = recording.context.languages
+        # Only a single known language: a hint of one language for a recording in two would make Scribe translate
+        language = expected[0] if len(expected) == 1 else None
+        label = f'{recording.download_id}/{recording.media_name}'
+        started = time.monotonic()
+        try:
+            answer = await send_with_retries(
+                lambda: self.client.transcribe(recording.audio_path, audio.AUDIO_MIME_TYPE, language), label
+            )
+        except ProviderError as e:
+            raise TranscriptionFailed(e.code, e.message) from e
+        latency = round(time.monotonic() - started, 1)
+        # Saved before anything else is done with it: the audio is paid for
+        words_name = Path(recording.media_name).stem + TRANSCRIPT_WORDS_SUFFIX
+        write_atomic(
+            recording.download_dir / words_name,
+            lambda f: json.dump(answer, f, ensure_ascii=False, separators=(',', ':')),
+        )
+        words = [word for word in answer['words'] if isinstance(word, dict)]
+        detected = answer.get('language_code')
+        segments = elevenlabs.segments(words, detected)
+        folded = elevenlabs.fold_backchannels(segments)
+        audio_seconds = float(answer.get('audio_duration_secs') or recording.duration)
+        usage = {'audio_seconds': round(audio_seconds, 3)}
+        logger.info(
+            'Transcription %s: ElevenLabs answered in %.1f s: language=%s words=%d audio_seconds=%.1f',
+            label,
+            latency,
+            detected,
+            len(words),
+            audio_seconds,
+        )
+        warnings = []
+        share = languages.expected_share(' '.join(s['text'] for s in segments), expected)
+        if share is not None and share < languages.MIN_EXPECTED_SHARE:
+            warnings.append(
+                problem(
+                    'wrong_script',
+                    f'{1 - share:.0%} of the letters are in a script that {languages.describe(expected)} is not '
+                    f'written in; ElevenLabs heard {detected or "an unknown language"}.',
+                )
+            )
+        labels = elevenlabs.speaker_labels(words)
+        fields = {
+            'provider': 'elevenlabs',
+            'language_requested': language,
+            'language': detected,
+            'language_probability': answer.get('language_probability'),
+            'transcription_id': answer.get('transcription_id'),
+            'latency_seconds': latency,
+            'speakers': [{'id': speaker_id, 'label': name} for speaker_id, name in labels.items()],
+            'backchannels': folded,
+            'words_file': words_name,
+            'chapters': [{'start': start, 'title': title} for start, title in recording.context.chapters],
+        }
+        cost = pricing.estimate(self.model, [usage], datetime.now(UTC).date())
+        check_repeats = recording.duration < chunking.CHUNKED_FROM_SECONDS
+        return TranscriberResult(segments, usage, cost, warnings, fields, check_repeats, files=[words_name])
+
+
 def make_transcriber(settings: config.TranscriptionSettings) -> Transcriber:
+    if settings.provider == 'elevenlabs':
+        return ElevenLabsTranscriber(elevenlabs.ElevenLabsClient(settings.api_key, settings.model))
     return GeminiTranscriber(make_provider(settings))
+
+
+async def send_with_retries(call, label: str):
+    """The answer of call(), sent again after a rate limit, a server error or a network failure"""
+    for delay in (*TRANSIENT_RETRY_DELAYS, None):
+        try:
+            return await call()
+        except ProviderError as e:
+            if not e.transient or delay is None:
+                raise
+            logger.warning('Transcription %s: %s, sending it again in %d s', label, e.message, delay)
+            await asyncio.sleep(delay)
+    raise AssertionError('unreachable')
 
 
 async def run_pipeline(download_id: str, download_dir: Path, media_name: str, metadata: dict, transcriber: Transcriber):
@@ -768,7 +875,7 @@ async def run_pipeline(download_id: str, download_dir: Path, media_name: str, me
     write_atomic(download_dir / json_name, lambda f: json.dump(transcript, f, indent=2, ensure_ascii=False))
     markdown = render_markdown(metadata.get('title'), media_name, transcript, duration)
     write_atomic(download_dir / md_name, lambda f: f.write(markdown))
-    return [md_name, json_name], warnings, result.usage, result.cost
+    return [md_name, json_name, *result.files], warnings, result.usage, result.cost
 
 
 # --- Long recordings: chunks transcribed in parallel, each validated and retried on its own
@@ -1131,15 +1238,7 @@ class ChunkedRun:
         return Piece(part.start, part.end, segments, transcript.unparsed), record
 
     async def send(self, request: TranscriptionRequest, label: str) -> ProviderResponse:
-        for delay in (*TRANSIENT_RETRY_DELAYS, None):
-            try:
-                return await self.provider.transcribe(request)
-            except ProviderError as e:
-                if not e.transient or delay is None:
-                    raise
-                logger.warning('Transcription %s: %s, sending it again in %d s', label, e.message, delay)
-                await asyncio.sleep(delay)
-        raise AssertionError('unreachable')
+        return await send_with_retries(lambda: self.provider.transcribe(request), label)
 
     def chunk_segments(self, index: int) -> list[dict]:
         return [segment for piece in self.pieces[index] or [] for segment in piece.segments]
@@ -1274,7 +1373,12 @@ async def transcribe_media_task(download_id: str, media_name: str):
     try:
         settings = config.transcription_settings()
         metadata = set_transcription(
-            download_dir, media_name, status='running', model=settings.model, started_at=storage.now_iso()
+            download_dir,
+            media_name,
+            status='running',
+            provider=settings.provider,
+            model=settings.model,
+            started_at=storage.now_iso(),
         )
         if not settings.available:
             raise TranscriptionFailed('not_configured', ERROR_MESSAGES['not_configured'])

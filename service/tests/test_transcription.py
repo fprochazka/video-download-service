@@ -508,7 +508,7 @@ def test_transcribe_without_api_key_is_unavailable(client, downloads_dir):
 
     assert response_.status_code == 503
     assert response_.json() == {
-        'detail': 'Transcription is not configured, set GEMINI_API_KEY.',
+        'detail': 'Transcription is not configured, set TRANSCRIPTION_PROVIDER and its API key.',
         'error_code': 'not_configured',
     }
     assert 'transcriptions' not in read_metadata(downloads_dir, JOB_ID)
@@ -620,16 +620,15 @@ def test_vtt_cues_strip_tags_and_rolling_repeats():
 
 
 def test_transcription_settings_from_env(monkeypatch):
-    monkeypatch.delenv('GEMINI_API_KEY', raising=False)
-    monkeypatch.delenv('TRANSCRIPTION_MODEL', raising=False)
-    assert config.transcription_settings() == config.TranscriptionSettings(api_key=None, model='gemini-3.5-flash-lite')
+    assert config.transcription_settings() == config.TranscriptionSettings(None, None, None)
     assert not config.transcription_settings().available
 
+    monkeypatch.setenv('TRANSCRIPTION_PROVIDER', 'Gemini')
     monkeypatch.setenv('GEMINI_API_KEY', API_KEY)
     monkeypatch.setenv('TRANSCRIPTION_MODEL', 'gemini-3.8-flash')
     settings = config.transcription_settings()
     assert settings.available
-    assert settings.model == 'gemini-3.8-flash'
+    assert (settings.provider, settings.model) == ('gemini', 'gemini-3.8-flash')
     assert API_KEY not in repr(settings)
     assert config.transcription_concurrency() == 2
 

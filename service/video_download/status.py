@@ -30,13 +30,16 @@ class TranscriptionUsage(BaseModel):
     output_tokens: int = 0
     thinking_tokens: int = 0
     prompt_audio_tokens: int | None = None  # None for transcriptions stored before it was recorded
+    audio_seconds: float | None = None  # a provider that bills the length of the audio, not tokens
 
 
 class TranscriptionPrices(BaseModel):
     model: str | None = None
-    input_text: float
-    input_audio: float
-    output: float
+    # USD per million tokens, or per hour of audio
+    input_text: float | None = None
+    input_audio: float | None = None
+    output: float | None = None
+    per_hour: float | None = None
     as_of: str | None = None
     source: str | None = None
 
@@ -54,6 +57,7 @@ class TranscriptionWarning(BaseModel):
 
 class Transcription(BaseModel):
     status: str  # pending, running, completed, failed
+    provider: str | None = None  # gemini, elevenlabs; None for transcriptions stored before it was recorded
     model: str | None = None
     requested_at: str | None = None
     started_at: str | None = None
@@ -106,7 +110,8 @@ class DownloadStatus(BaseModel):
     used_youtube_cookies: bool | None = None
     subtitles_error: str | None = None
     transcriptions: dict[str, Transcription] = {}
-    # Whether the server can transcribe at all (GEMINI_API_KEY is set), the page disables its Transcribe buttons if not
+    # Whether the server can transcribe at all (a provider and its key are set); the page disables its Transcribe
+    # buttons if not
     transcription_available: bool = False
     created_at: str
     updated_at: str

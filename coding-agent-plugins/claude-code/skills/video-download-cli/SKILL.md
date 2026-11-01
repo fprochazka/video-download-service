@@ -7,7 +7,7 @@ allowed-tools: Bash(video-download --help), Bash(video-download --refresh-tools 
 
 # Video download CLI
 
-`video-download` calls the tools of the video download service's MCP server. The service downloads one video or post with yt-dlp, together with its subtitles and its details (`info.json`), and can transcribe a downloaded file with Gemini. `video-download --help` lists the tools, `video-download <command> --help` shows a tool's full description and options.
+`video-download` calls the tools of the video download service's MCP server. The service downloads one video or post with yt-dlp, together with its subtitles and its details (`info.json`), and can transcribe a downloaded file with its transcription provider. `video-download --help` lists the tools, `video-download <command> --help` shows a tool's full description and options.
 
 ## Setup
 
@@ -36,12 +36,12 @@ The CLI reads the service's base URL from `VIDEO_DOWNLOAD_URL` (for example `htt
    ```bash
    curl -sS "<subtitle url>"
    ```
-5. Transcribe only when the user asks for a transcript, or when the job has no subtitle files or they look broken: truncated, in the wrong language or garbled. A transcription costs money, about $0.13 per hour of speech, so ask the user first unless they asked for the transcript.
+5. Transcribe only when the user asks for a transcript, or when the job has no subtitle files or they look broken: truncated, in the wrong language or garbled. A transcription costs money, the price per hour is in `video-download transcribe-file --help`, so ask the user first unless they asked for the transcript.
    ```bash
    video-download transcribe-file --download-id <download_id> --filename <name of a media file>
    ```
-   It answers at once. Follow it with `get-job --wait-seconds 60` as in step 2 until the transcription in `transcriptions` is `completed` or `failed`. The transcript is two new files of kind `transcript` (`.transcript.md` and `.transcript.json`); download them by their URL like the subtitles. A new transcript replaces an earlier one of the same file.
-   If `video-download --help` lists no `transcribe-file`, the service has no Gemini key and cannot transcribe; tell the user.
+   It answers at once. Follow it with `get-job --wait-seconds 60` as in step 2 until the transcription in `transcriptions` is `completed` or `failed`. The transcript is new files of kind `transcript`; read the `.transcript.md` by its URL like the subtitles. The `.transcript.json` has the segments with their times, and an ElevenLabs transcript also has a large `.transcript.words.json` with every word, which you rarely need. A new transcript replaces an earlier one of the same file.
+   If `video-download --help` lists no `transcribe-file`, the service has no transcription provider configured and cannot transcribe; tell the user.
 
 To give the user a file, give them its URL. Download the media file only when the task needs it locally.
 

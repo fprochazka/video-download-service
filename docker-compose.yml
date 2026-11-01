@@ -15,7 +15,8 @@ services:
       - ./instagram_cookies.txt:/app/instagram_cookies.txt
       - ./extractor_config.py:/app/extractor_config.py:ro
     restart: unless-stopped
-    # PUBLIC_BASE_URL, GEMINI_API_KEY and the other settings, see app.env.example; without it transcription is off and /mcp answers only localhost
+    # PUBLIC_BASE_URL, TRANSCRIPTION_PROVIDER with its API key and the other settings, see app.env.example; without it
+    # transcription is off and /mcp answers only localhost
     env_file:
       - path: app.env
         required: false

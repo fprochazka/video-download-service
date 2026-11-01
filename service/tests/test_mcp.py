@@ -102,7 +102,7 @@ async def test_the_tool_descriptions_tell_an_agent_how_to_use_the_tools(download
     assert 'when the user asks for a transcript' in download.description
     assert 'transcribe a video file with transcribe_file' in download.description
     assert 'longer with transcribe' not in download.description
-    assert '$0.13 per hour' in tools['transcribe_file'].description
+    assert 'with Gemini, about $0.13 per hour of speech.' in tools['transcribe_file'].description
     assert 'when the user asks for a transcript' in tools['transcribe_file'].description
     assert 'no subtitle files' in tools['transcribe_file'].description
     get_job = tools['get_job']
@@ -324,6 +324,28 @@ async def test_a_job_with_a_queued_transcription_is_still_running(downloads_dir)
         'transcribing 2/2',
     )
     assert result.structured_content['done'] is False
+
+
+@pytest.mark.anyio
+async def test_the_transcription_price_follows_the_provider(downloads_dir, scribe):
+    async with running_app(), mcp_client() as client:
+        tools = {tool.name: tool for tool in await client.list_tools()}
+
+    description = tools['transcribe_file'].description
+    assert description.startswith(
+        'Transcribe one video or audio file of a completed job with ElevenLabs Scribe, $0.22 per'
+    )
+    assert 'Gemini' not in description
+
+
+@pytest.mark.anyio
+async def test_a_model_without_a_measured_price_only_says_it_costs_money(downloads_dir, genai, monkeypatch):
+    monkeypatch.setenv('TRANSCRIPTION_MODEL', 'gemini-3.8-flash')
+
+    async with running_app(), mcp_client() as client:
+        tools = {tool.name: tool for tool in await client.list_tools()}
+
+    assert 'with Gemini, which costs money.' in tools['transcribe_file'].description
 
 
 @pytest.mark.anyio

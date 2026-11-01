@@ -2,9 +2,10 @@ import pytest
 import yt_dlp
 from fastapi.testclient import TestClient
 
+from tests import elevenlabs_fakes
 from tests.genai_fakes import API_KEY, FakeGenai
 from tests.ytdlp_fakes import FakeYoutubeDL
-from video_download import audio, config, gemini, web
+from video_download import audio, config, elevenlabs, gemini, transcription, web
 from video_download.csrf import CSRF_COOKIE, CSRF_HEADER
 
 # PUBLIC_BASE_URL of the MCP tests
@@ -12,7 +13,9 @@ BASE_URL = 'https://video-download.example.ts.net'
 
 # The settings the service reads from its environment; a value in the developer's environment must never reach a test
 SERVICE_ENV = (
+    'TRANSCRIPTION_PROVIDER',
     'GEMINI_API_KEY',
+    'ELEVENLABS_API_KEY',
     'TRANSCRIPTION_MODEL',
     'TRANSCRIPTION_PRICES',
     'TRANSCRIPTION_CONCURRENCY',
@@ -73,7 +76,19 @@ def genai(monkeypatch, downloads_dir):
     fake = FakeGenai()
     monkeypatch.setattr(gemini, 'make_client', fake.client)
     monkeypatch.setattr(gemini, 'FILE_POLL_SECONDS', 0)
+    monkeypatch.setenv('TRANSCRIPTION_PROVIDER', 'gemini')
     monkeypatch.setenv('GEMINI_API_KEY', API_KEY)
+    return fake
+
+
+@pytest.fixture
+def scribe(monkeypatch, downloads_dir):
+    """ElevenLabs selected, with its HTTP endpoint faked and the retries without their delays"""
+    fake = elevenlabs_fakes.FakeScribe()
+    monkeypatch.setattr(elevenlabs, 'http_client', fake.client)
+    monkeypatch.setattr(transcription, 'TRANSIENT_RETRY_DELAYS', (0, 0))
+    monkeypatch.setenv('TRANSCRIPTION_PROVIDER', 'elevenlabs')
+    monkeypatch.setenv('ELEVENLABS_API_KEY', elevenlabs_fakes.API_KEY)
     return fake
 
 

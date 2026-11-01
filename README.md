@@ -1,6 +1,6 @@
 # Video Download Service
 
-A self-hosted web service that downloads videos with yt-dlp, with their subtitles and details, and transcribes them with Gemini. It has a web page for people and an MCP server for agents, and runs with Docker Compose behind a Tailscale sidecar.
+A self-hosted web service that downloads videos with yt-dlp, with their subtitles and details, and transcribes them with Gemini or ElevenLabs Scribe, one provider per deployment. It has a web page for people and an MCP server for agents, and runs with Docker Compose behind a Tailscale sidecar.
 
 The repository holds two independent uv projects:
 
@@ -17,7 +17,7 @@ To give Claude Code the skill, install the plugin, then install the CLI as descr
 
 ## Deployment
 
-`docker-compose.yml` stays at the repository root and builds the image from `service/`. The files it mounts into the container sit next to it: `downloads/`, `instagram_cookies.txt`, `extractor_config.py` (see `extractor_config.example.py`), `app.env` (see `app.env.example`) and `.env` with the Tailscale auth key (see `.env.example`). Set `PUBLIC_BASE_URL` in `app.env` to the service's tailnet URL; the MCP endpoint accepts only that host.
+`docker-compose.yml` stays at the repository root and builds the image from `service/`. The files it mounts into the container sit next to it: `downloads/`, `instagram_cookies.txt`, `extractor_config.py` (see `extractor_config.example.py`), `app.env` (see `app.env.example`) and `.env` with the Tailscale auth key (see `.env.example`). Set `PUBLIC_BASE_URL` in `app.env` to the service's tailnet URL; the MCP endpoint accepts only that host. Set `TRANSCRIPTION_PROVIDER` (`gemini`, `elevenlabs` or `none`) and the provider's key; a deployment that had only `GEMINI_API_KEY` needs `TRANSCRIPTION_PROVIDER=gemini` now. The service does not start with a setting it cannot use, and `docker compose logs video-download` names it.
 
 ```bash
 git pull

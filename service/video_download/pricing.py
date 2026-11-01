@@ -1,8 +1,8 @@
-"""The estimated price of a transcription, from the token usage Gemini reports and a table of list prices.
+"""The estimated price of a transcription, from the usage a provider reports and a table of list prices.
 
-Gemini's response carries token counts only, no amount of money, so the price is computed here and is an estimate: it
-uses the standard paid tier and does not know about free-tier quota, discounts or price changes after the table was
-written. TRANSCRIPTION_PRICES replaces or adds the prices of a model without a code change, see README; the app checks
+Gemini's response carries token counts only, ElevenLabs' the length of the audio, and neither an amount of money, so the
+price is computed here and is an estimate: it uses the standard paid tier and does not know about free-tier quota,
+included hours of a plan, discounts or price changes after the table was written. TRANSCRIPTION_PRICES replaces or adds the prices of a model without a code change, see README; the app checks
 it at startup and does not start with an invalid one.
 """
 
@@ -24,14 +24,19 @@ AUDIO_TOKENS_PER_SECOND = 25
 PRICES_ENV = 'TRANSCRIPTION_PRICES'
 
 
+ELEVENLABS_SOURCE = 'https://elevenlabs.io/pricing/api'
+# The page shows no date of its own, read on 2026-11-01
+ELEVENLABS_AS_OF = '2026-11-01'
+
+
 @dataclass(frozen=True)
 class Price:
-    """USD per million tokens of one model, standard paid tier"""
+    """USD per million tokens of one model, standard paid tier, or per hour of audio for a speech-to-text model"""
 
     # Prompt tokens of text, images and video, and of audio unless input_audio is set
-    input: float
+    input: float | None = None
     # Output tokens, thinking tokens included: the pricing page says "Output price (including thinking tokens)"
-    output: float
+    output: float | None = None
     input_audio: float | None = None
     # A request with more prompt tokens than this pays the long-context prices for all of its tokens
     long_context_tokens: int | None = None
@@ -42,6 +47,8 @@ class Price:
     # When the price was read, and where from
     as_of: str | None = AS_OF
     source: str = SOURCE
+    # USD per hour of audio, prorated per second; the token prices are then unused
+    per_hour: float | None = None
 
 
 def flash_2027(**overrides) -> list[Price]:
@@ -60,10 +67,12 @@ DEFAULT_PRICES: dict[str, list[Price]] = {
     ],
     # The page prices its audio input and text output; the one text token of its prompt is priced as audio
     'gemini-3.5-transcribe': [Price(2.00, 12.00)],
+    # The same price on every plan, keyterms and transcript editing cost extra and the service uses neither
+    'scribe_v2': [Price(per_hour=0.22, as_of=ELEVENLABS_AS_OF, source=ELEVENLABS_SOURCE)],
 }
 
 
-FLOAT_FIELDS = ('input', 'output', 'input_audio', 'input_long', 'output_long')
+FLOAT_FIELDS = ('input', 'output', 'input_audio', 'input_long', 'output_long', 'per_hour')
 
 
 def price_fields(entry: dict) -> dict:
@@ -77,12 +86,15 @@ def price_fields(entry: dict) -> dict:
         values['long_context_tokens'] = int(values['long_context_tokens'])
     if values.get('valid_from') is not None:
         date.fromisoformat(values['valid_from'])
+    if values.get('per_hour') is None and (values.get('input') is None or values.get('output') is None):
+        raise ValueError('a price needs input and output, or per_hour')
     return values
 
 
 @lru_cache(maxsize=4)
 def parse_overrides(raw: str) -> dict[str, list[Price]]:
-    """{"model": {"input": 0.3, "output": 2.5, ...}} or a list of such objects per model, for dated prices"""
+    """{"model": {"input": 0.3, "output": 2.5, ...}} or {"model": {"per_hour": 0.22}}, or a list of such objects per
+    model, for dated prices"""
     try:
         data = json.loads(raw)
         if not isinstance(data, dict):
@@ -113,7 +125,10 @@ def price_of(model: str | None, on: date) -> Price | None:
 
 
 def request_cost(price: Price, usage: dict) -> float:
-    """USD of one request's usage: prompt_tokens (prompt_audio_tokens of them audio), output_tokens, thinking_tokens"""
+    """USD of one request's usage: prompt_tokens (prompt_audio_tokens of them audio), output_tokens, thinking_tokens,
+    or audio_seconds for a price per hour"""
+    if price.per_hour is not None:
+        return math.ceil(usage.get('audio_seconds') or 0) * price.per_hour / 3600
     prompt = usage.get('prompt_tokens') or 0
     audio = min(prompt, usage.get('prompt_audio_tokens') or 0)
     output = (usage.get('output_tokens') or 0) + (usage.get('thinking_tokens') or 0)
@@ -129,8 +144,12 @@ def estimate(model: str | None, requests: list[dict], on: date) -> dict | None:
     price = price_of(model, on)
     if price is None:
         return None
+    usd = round(sum(request_cost(price, usage) for usage in requests), 6)
+    if price.per_hour is not None:
+        prices = {'model': model, 'per_hour': price.per_hour, 'as_of': price.as_of, 'source': price.source}
+        return {'usd': usd, 'estimated': True, 'prices': prices}
     return {
-        'usd': round(sum(request_cost(price, usage) for usage in requests), 6),
+        'usd': usd,
         'estimated': True,
         'prices': {
             'model': model,

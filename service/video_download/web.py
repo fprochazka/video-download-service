@@ -23,7 +23,7 @@ from video_download.urls import InvalidDownloadUrl
 from video_download.worker import DOWNLOAD, TRANSCRIPTION, JobWorker
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-# httpx logs every request URL of the Gemini SDK at INFO, nothing the service log needs
+# httpx logs every request URL of the Gemini SDK and the ElevenLabs client at INFO, nothing the service log needs
 logging.getLogger('httpx').setLevel(logging.WARNING)
 
 TEMPLATES_DIR = Path(__file__).parent / 'templates'
@@ -76,7 +76,7 @@ app = FastAPI(title='Video Download Service', lifespan=lifespan)
 
 def create_mcp_app(fastapi_app: FastAPI):
     """The MCP server's ASGI app; which tools it offers depends on the configuration, read once at startup"""
-    server = create_server(lambda: fastapi_app.state.worker, config.transcription_settings().available)
+    server = create_server(lambda: fastapi_app.state.worker, config.transcription_settings())
     server.add_extension(JobTasksExtension())
     # Stateless: each MCP request stands on its own and every tool reads the job from disk, so no session outlives a
     # restart. The Host guard keeps a page on another site from reaching the endpoint through DNS rebinding; there is

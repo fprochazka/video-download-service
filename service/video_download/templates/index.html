@@ -392,19 +392,21 @@
         };
 
         const TRANSCRIPTION_HINTS = {
-            not_configured: 'Set GEMINI_API_KEY in app.env on the server (see README) and restart it.',
-            rate_limited: 'Gemini is rate-limiting the API key, try again in a minute.',
+            not_configured: 'Set TRANSCRIPTION_PROVIDER and its API key in app.env on the server (see README) and restart it.',
+            rate_limited: 'The transcription provider is rate-limiting the API key, try again in a minute.',
             output_truncated: 'The answer hit the output token limit, try again.',
             chunk_failed: 'Gemini gave no usable answer for a part of the recording, even after retries; try again.',
             blocked: 'Gemini refused the content (safety or recitation filter).',
-            invalid_response: 'Gemini returned a malformed transcript, try again.',
-            provider_error: 'The Gemini API failed, try again later.',
+            invalid_response: 'The transcription provider returned a malformed transcript, try again.',
+            provider_error: 'The transcription provider failed, try again later.',
+            too_long: 'The recording is longer than the provider takes in one request.',
+            insufficient_credits: 'The ElevenLabs account has no credits left, top it up and try again.',
             audio_extraction_failed: 'ffmpeg could not read the audio of this file.',
             media_missing: 'The media file was deleted.',
             interrupted: 'The service restarted during the transcription, try again.',
         };
 
-        const TRANSCRIPTION_UNAVAILABLE = 'Transcription is not configured on the server (GEMINI_API_KEY, see README)';
+        const TRANSCRIPTION_UNAVAILABLE = 'Transcription is not configured on the server (TRANSCRIPTION_PROVIDER, see README)';
 
         function escapeHtml(value) {
             return String(value)
@@ -513,10 +515,11 @@
             return `≈ $${usd.toFixed(digits)}`;
         }
 
-        // The price is an estimate from token counts and list prices, the tooltip says which ones
+        // The price is an estimate from token counts, or the length of the audio, and list prices; the tooltip says which ones
         function renderCost(transcription) {
             const usage = transcription.usage;
             if (!usage) return '';
+            if (typeof usage.audio_seconds === 'number') return renderAudioCost(transcription);
             const audio = typeof usage.prompt_audio_tokens === 'number' ? ` (${formatTokens(usage.prompt_audio_tokens)} audio)` : '';
             const tokens = `${formatTokens(usage.prompt_tokens)} input tokens${audio}, ${formatTokens(usage.output_tokens)} output tokens, ${formatTokens(usage.thinking_tokens)} thinking tokens`;
             const cost = transcription.cost;
@@ -527,6 +530,19 @@
             const prices = cost.prices || {};
             const title = `${tokens}. Estimated with the list prices of ${prices.model} as of ${prices.as_of || 'an unknown date'}, `
                 + `in USD per million tokens: ${prices.input_text} text input, ${prices.input_audio} audio input, ${prices.output} output.`;
+            return `<span class="file-cost" title="${escapeHtml(title)}">${escapeHtml(formatUsd(cost.usd))}</span>`;
+        }
+
+        function renderAudioCost(transcription) {
+            const audio = `${formatTokens(Math.ceil(transcription.usage.audio_seconds))} s of audio`;
+            const cost = transcription.cost;
+            if (!cost || typeof cost.usd !== 'number') {
+                const title = `No price is known for ${transcription.model || 'this model'}. ${audio}`;
+                return `<span class="file-cost" title="${escapeHtml(title)}">${escapeHtml(audio)}</span>`;
+            }
+            const prices = cost.prices || {};
+            const title = `${audio}. Estimated with the list price of ${prices.model} as of ${prices.as_of || 'an unknown date'}: `
+                + `${prices.per_hour} USD per hour of audio.`;
             return `<span class="file-cost" title="${escapeHtml(title)}">${escapeHtml(formatUsd(cost.usd))}</span>`;
         }
 

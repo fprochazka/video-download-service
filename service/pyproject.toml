@@ -8,8 +8,10 @@ dependencies = [
     "fastapi>=0.162.0",
     "fastmcp>=4.1.4",
     "google-genai>=2.34.0",
+    "httpx>=0.28.1",
     "pysilero-vad>=3.4.0",
     "python-multipart>=0.0.32",
+    "text2num>=3.1.0",
     "uvicorn>=0.54.0",
     "yt-dlp[default,deno]>=2026.10.26",
 ]
@@ -17,7 +19,6 @@ dependencies = [
 [dependency-groups]
 dev = [
     "fastmcp-tasks>=4.1.4",
-    "httpx>=0.28.1",
     "jsonschema>=4.26.0",
     "pytest>=9.2.0",
     "ruff>=0.17.3",

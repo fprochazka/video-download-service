@@ -113,6 +113,34 @@ def test_invalid_env_prices_are_a_config_error(monkeypatch, value):
         pricing.prices()
 
 
+def test_scribe_is_priced_per_second_of_audio():
+    cost = pricing.estimate('scribe_v2', [{'audio_seconds': 3600}], DAY)
+
+    assert cost == {
+        'usd': 0.22,
+        'estimated': True,
+        'prices': {'model': 'scribe_v2', 'per_hour': 0.22, 'as_of': '2026-11-01', 'source': pricing.ELEVENLABS_SOURCE},
+    }
+    # A started second is billed whole
+    assert usd('scribe_v2', {'audio_seconds': 356.2}) == approx(357 * 0.22 / 3600)
+
+
+def test_env_sets_a_price_per_hour(monkeypatch):
+    monkeypatch.setenv('TRANSCRIPTION_PRICES', '{"scribe_v2": {"per_hour": 0.40, "as_of": "2027-01-01"}}')
+
+    cost = pricing.estimate('scribe_v2', [{'audio_seconds': 1800}], DAY)
+
+    assert cost['usd'] == approx(0.20)
+    assert (cost['prices']['per_hour'], cost['prices']['source']) == (0.40, 'TRANSCRIPTION_PRICES')
+
+
+def test_a_price_without_input_output_or_per_hour_is_a_config_error(monkeypatch):
+    monkeypatch.setenv('TRANSCRIPTION_PRICES', '{"scribe_v3": {"as_of": "2027-01-01"}}')
+
+    with pytest.raises(config.ConfigError, match='a price needs input and output, or per_hour'):
+        pricing.prices()
+
+
 def test_stored_usage_without_audio_count_assumes_25_tokens_per_second():
     legacy = {'prompt_tokens': 11293, 'output_tokens': 4019, 'thinking_tokens': 0}
 

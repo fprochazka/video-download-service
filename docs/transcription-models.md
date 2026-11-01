@@ -67,6 +67,7 @@ One request per recording, no chunking: `scribe_v2` with speaker labels, word ti
 - Scribe keeps fillers, backchannels and cut-off words. The English transcript has 154 lines that are only "Mm-hmm" or "Yeah", against Gemini's 58.
 - In Czech Scribe got several phrases right that Gemini garbled ("proti předchozímu časový Fedovi", "o těch scamech"), standardized some colloquial forms ("todle" becomes "tohle" in 12 of 13 cases) and swapped in a wrong place name (Réunion for Rujána).
 - Audio events come in the recording's language: `[laughs]`, `[gentle music]`, `[smích]`, `[hudba]`.
+- The service offers Scribe as its second provider, `TRANSCRIPTION_PROVIDER=elevenlabs`. Its Markdown puts the short interjections between two long turns of the other speaker in parentheses (96 of the English interview's turns) and writes English numbers in digits; Czech numbers stay words, see [the service README](../service/README.md#elevenlabs-scribe).
 
 ## Gotchas of the Gemini API
 
