@@ -204,6 +204,27 @@ const EVIL_MEDIA = '"><img src=x onerror=alert(1)>.mp4';
         eval(source);
         listeners['window:load']();
         await flush();
+    } else if (scenario === 'transcription-costs-reported') {
+        window.location.pathname = `/jobs/${jobId}`;
+        const usage = { prompt_tokens: 0, output_tokens: 0, thinking_tokens: 0, prompt_audio_tokens: null, audio_seconds: 5.0135 };
+        const prices = { model: 'scribe_v2', per_hour: 0.22, as_of: '2026-11-01', input_text: null, input_audio: null, output: null };
+        const job = transcribableJob(jobId, {
+            'Some_video-abc.mp4': {
+                status: 'completed', provider: 'elevenlabs', model: 'scribe_v2', files: [], usage,
+                cost: { usd: 0.000364, estimated: false, source: 'provider', estimate_usd: 0.000367, prices },
+                provider_report: { transcription_id: 'tr-1', credits: 1, cost: { amount: 0.000364, currency: 'usd' } },
+            },
+            // Reported, with no list price and no report: the amount alone
+            [EVIL_MEDIA]: {
+                status: 'completed', provider: 'elevenlabs', model: 'scribe_<b>v9</b>', files: [], usage,
+                cost: { usd: 1.5, estimated: false, source: 'provider', estimate_usd: null, prices: null },
+                provider_report: null,
+            },
+        });
+        fetchResponse = json(200, job);
+        eval(source);
+        listeners['window:load']();
+        await flush();
     } else if (scenario === 'transcribe-click' || scenario === 'transcribe-refused') {
         window.location.pathname = `/jobs/${jobId}`;
         let requested = false;

@@ -1,9 +1,12 @@
-"""The estimated price of a transcription, from the usage a provider reports and a table of list prices.
+"""The price of a transcription: the amount the provider reported, or an estimate from its usage and a table of list
+prices.
 
-Gemini's response carries token counts only, ElevenLabs' the length of the audio, and neither an amount of money, so the
-price is computed here and is an estimate: it uses the standard paid tier and does not know about free-tier quota,
-included hours of a plan, discounts or price changes after the table was written. TRANSCRIPTION_PRICES replaces or adds the prices of a model without a code change, see README; the app checks
-it at startup and does not start with an invalid one.
+ElevenLabs reports the amount of money of each request in its response headers, see elevenlabs.provider_report; that
+amount is the cost, and the estimate stays next to it for comparison. Gemini's response carries token counts only, so
+its price is computed here and is an estimate: it uses the standard paid tier and does not know about free-tier quota,
+included hours of a plan, discounts or price changes after the table was written. TRANSCRIPTION_PRICES replaces or adds
+the prices of a model without a code change, see README; the app checks it at startup and does not start with an
+invalid one.
 """
 
 import json
@@ -172,3 +175,14 @@ def estimate_stored(model: str | None, usage: dict | None, duration: float | Non
         audio = prompt if not duration else min(prompt, math.ceil(duration * AUDIO_TOKENS_PER_SECOND))
         usage = usage | {'prompt_audio_tokens': audio}
     return estimate(model, [usage], on)
+
+
+def with_reported(estimated: dict | None, reported: dict | None) -> dict | None:
+    """The cost entry of a transcription whose provider reported {amount, currency}: the reported amount when it is in
+    USD, with the estimate as estimate_usd; the estimate alone when there is no amount in USD"""
+    if not reported or reported.get('currency') != 'usd':
+        return estimated
+    cost = {'usd': reported['amount'], 'estimated': False, 'source': 'provider'}
+    if estimated:
+        cost |= {'estimate_usd': estimated['usd'], 'prices': estimated['prices']}
+    return cost

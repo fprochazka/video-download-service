@@ -515,10 +515,25 @@
             return `≈ $${usd.toFixed(digits)}`;
         }
 
-        // The price is an estimate from token counts, or the length of the audio, and list prices; the tooltip says which ones
+        // An amount the provider reported is shown as it came, up to a millionth of a dollar
+        function formatReportedUsd(usd) {
+            return usd >= 1 ? `$${usd.toFixed(2)}` : `$${Number(usd.toFixed(6))}`;
+        }
+
+        function renderReportedCost(transcription) {
+            const cost = transcription.cost;
+            const report = transcription.provider_report || {};
+            const credits = typeof report.credits === 'number' ? `, ${formatTokens(report.credits)} ${report.credits === 1 ? 'credit' : 'credits'}` : '';
+            const estimate = typeof cost.estimate_usd === 'number' ? ` The estimate from the list price was ${formatUsd(cost.estimate_usd)}.` : '';
+            const title = `The cost ${transcription.provider === 'elevenlabs' ? 'ElevenLabs' : 'the provider'} reported for the request${credits}.${estimate}`;
+            return `<span class="file-cost" title="${escapeHtml(title)}">${escapeHtml(formatReportedUsd(cost.usd))}</span>`;
+        }
+
+        // The price the provider reported, or an estimate from token counts, or the length of the audio, and list prices; the tooltip says which
         function renderCost(transcription) {
             const usage = transcription.usage;
             if (!usage) return '';
+            if (transcription.cost && transcription.cost.estimated === false && typeof transcription.cost.usd === 'number') return renderReportedCost(transcription);
             if (typeof usage.audio_seconds === 'number') return renderAudioCost(transcription);
             const audio = typeof usage.prompt_audio_tokens === 'number' ? ` (${formatTokens(usage.prompt_audio_tokens)} audio)` : '';
             const tokens = `${formatTokens(usage.prompt_tokens)} input tokens${audio}, ${formatTokens(usage.output_tokens)} output tokens, ${formatTokens(usage.thinking_tokens)} thinking tokens`;

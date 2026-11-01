@@ -21,11 +21,20 @@ def transcript_lines(lines=None) -> str:
     )
 
 
-def response(text: str | None = None, finish_reason='STOP', usage=(1000, 200, 0), block_reason=None, audio_tokens=None):
+def response(
+    text: str | None = None,
+    finish_reason='STOP',
+    usage=(1000, 200, 0),
+    block_reason=None,
+    audio_tokens=None,
+    response_id='resp-1',
+):
     """audio_tokens of the prompt tokens are audio, the rest text; by default three quarters"""
     prompt_tokens, output_tokens, thinking_tokens = usage
     audio = prompt_tokens * 3 // 4 if audio_tokens is None else audio_tokens
     data = {
+        'model_version': 'gemini-3.5-flash-lite-001',
+        'response_id': response_id,
         'usage_metadata': {
             'prompt_token_count': prompt_tokens,
             'prompt_tokens_details': [
@@ -34,6 +43,8 @@ def response(text: str | None = None, finish_reason='STOP', usage=(1000, 200, 0)
             ],
             'candidates_token_count': output_tokens,
             'thoughts_token_count': thinking_tokens,
+            'total_token_count': prompt_tokens + output_tokens + thinking_tokens,
+            'traffic_type': 'ON_DEMAND',
         },
     }
     if block_reason:

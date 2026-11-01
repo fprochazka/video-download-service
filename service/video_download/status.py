@@ -1,6 +1,7 @@
 """The status of a job as the API returns it: the job's metadata with its files, transcriptions and their cost"""
 
 from pathlib import Path
+from typing import Any
 
 from pydantic import BaseModel, Field
 
@@ -46,8 +47,36 @@ class TranscriptionPrices(BaseModel):
 
 class TranscriptionCost(BaseModel):
     usd: float
+    # False when the provider reported the amount (source provider), True for an estimate from usage and list prices
     estimated: bool = True
-    prices: TranscriptionPrices
+    source: str | None = None
+    # The estimate next to an amount the provider reported
+    estimate_usd: float | None = None
+    # The list prices of the estimate, None when the provider reported the amount and the model has no known price
+    prices: TranscriptionPrices | None = None
+
+
+class ReportedCost(BaseModel):
+    amount: float
+    currency: str  # lower case, e.g. usd
+
+
+class ProviderReport(BaseModel):
+    """What the provider itself reported about the transcription's requests; None for transcriptions stored before it
+    was recorded. ElevenLabs fills the first group of fields, Gemini the second."""
+
+    transcription_id: str | None = None
+    audio_seconds: float | None = None
+    credits: int | float | None = None
+    cost: ReportedCost | None = None
+    region: str | None = None
+    trace_id: str | None = None
+
+    requests: int | None = None
+    model_versions: list[str] | None = None
+    response_id: str | None = None  # of a single request; a chunked transcription has them in its chunks' attempts
+    finish_reasons: dict[str, int] | None = None
+    usage_metadata: dict[str, Any] | None = None  # summed over the requests, per-modality lists as {modality: tokens}
 
 
 class TranscriptionWarning(BaseModel):
@@ -66,8 +95,9 @@ class Transcription(BaseModel):
     error_code: str | None = None
     warnings: list[TranscriptionWarning] = []
     usage: TranscriptionUsage | None = None
-    # Estimated from usage and list prices, None for a model without a known price
+    # Reported by the provider, or estimated from usage and list prices; None for a model without a known price
     cost: TranscriptionCost | None = None
+    provider_report: ProviderReport | None = None
     files: list[str] = []
 
 

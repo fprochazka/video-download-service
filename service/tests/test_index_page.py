@@ -308,3 +308,16 @@ def test_a_transcription_priced_per_hour_shows_the_length_of_its_audio(page_scri
         {'text': '357 s of audio', 'title': 'No price is known for scribe_&lt;b&gt;v9&lt;/b&gt;. 357 s of audio'},
     ]
     assert '<b>v9' not in result['html']
+
+
+def test_a_cost_the_provider_reported_is_shown_without_the_approximation_sign(page_script):
+    result = run_scenario(page_script, 'transcription-costs-reported')
+
+    assert result['costs'] == [
+        {
+            'text': '$0.000364',
+            'title': 'The cost ElevenLabs reported for the request, 1 credit. The estimate from the list price was '
+            '≈ $0.0004.',
+        },
+        {'text': '$1.50', 'title': 'The cost ElevenLabs reported for the request.'},
+    ]

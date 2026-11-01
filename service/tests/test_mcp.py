@@ -166,7 +166,9 @@ async def test_structured_content_matches_the_advertised_output_schema(
         await jobs_done()
         failed = await client.call_tool('get_job', {'download_id': failing.structured_content['download_id']})
 
-    assert transcribed.structured_content['transcriptions'][MEDIA]['cost_usd'] > 0
+    state = transcribed.structured_content['transcriptions'][MEDIA]
+    assert (state['cost_usd'] > 0, state['cost_estimated']) == (True, True)
+    assert state['provider_report']['usage_metadata']['prompt_token_count'] == 1000
     assert failed.structured_content['error_code'] == 'unavailable'
     for name, result in [
         ('download_video', started),
@@ -463,3 +465,25 @@ def test_allowed_hosts_are_the_public_host_and_the_configured_ones(monkeypatch):
     monkeypatch.setenv('MCP_ALLOWED_HOSTS', 'video-download, 100.64.0.1 ')
 
     assert config.mcp_allowed_hosts() == ['video-download.example.ts.net', 'video-download', '100.64.0.1']
+
+
+@pytest.mark.anyio
+async def test_get_job_has_the_cost_elevenlabs_reported(downloads_dir, public_base_url, scribe, fake_audio):
+    FakeYoutubeDL.behaviour = video
+
+    async with running_app(), mcp_client() as client:
+        schemas = {tool.name: tool.output_schema for tool in await client.list_tools()}
+        started = await client.call_tool('download_video', {'url': VIDEO_URL})
+        download_id = started.structured_content['download_id']
+        await jobs_done()
+        await client.call_tool('transcribe_file', {'download_id': download_id, 'filename': MEDIA})
+        await jobs_done()
+        result = await client.call_tool('get_job', {'download_id': download_id})
+
+    jsonschema.validate(result.structured_content, schemas['get_job'])
+    state = result.structured_content['transcriptions'][MEDIA]
+    assert (state['cost_usd'], state['cost_estimated']) == (0.000364, False)
+    assert state['provider_report']['transcription_id'] == 'tr-123'
+    assert state['provider_report']['credits'] == 1
+    assert state['provider_report']['cost'] == {'amount': 0.000364, 'currency': 'usd'}
+    assert f'Transcription of {MEDIA}: completed, cost $0.000364 as reported by the provider' in result.content[0].text

@@ -24,7 +24,7 @@ from mcp_types import ToolAnnotations
 from pydantic import BaseModel, Field
 
 from video_download import config, jobs, pricing, transcription
-from video_download.status import ExpectedSubtitle, Progress, status_response
+from video_download.status import ExpectedSubtitle, Progress, ProviderReport, status_response
 from video_download.storage import LOG_FILENAME, TRANSCRIPT, load_metadata
 from video_download.urls import InvalidDownloadUrl
 from video_download.worker import JobWorker
@@ -124,7 +124,7 @@ def get_job_description(transcription: bool) -> str:
     )
     contents = 'the video details, the download progress while it runs, the files with kind, size and download URL, '
     if transcription:
-        contents += 'each transcription with its state and estimated cost, '
+        contents += 'each transcription with its state and cost, '
     return '\n'.join(
         [
             f'The state of a job: {states}.',
@@ -252,8 +252,15 @@ class JobTranscription(BaseModel):
     error: str | None
     error_code: str | None
     warnings: list[str]
-    cost_usd: float | None = Field(description='estimated from the usage and list prices')
+    cost_usd: float | None = Field(
+        description='the amount the provider reported when cost_estimated is false, an estimate from the usage and '
+        'list prices otherwise'
+    )
     cost_estimated: bool | None
+    provider_report: ProviderReport | None = Field(
+        description='what the provider reported about its requests: ElevenLabs its cost, credits and transcription_id, '
+        'Gemini its token usage, model versions and finish reasons'
+    )
     files: list[str]
     transcript_resource_uri: str | None
 
@@ -341,6 +348,7 @@ def job_summary(download_dir: Path, metadata: dict, base_url: str | None) -> dic
             warnings=[warning.message for warning in item.warnings],
             cost_usd=item.cost.usd if item.cost else None,
             cost_estimated=item.cost.estimated if item.cost else None,
+            provider_report=item.provider_report,
             files=item.files,
             transcript_resource_uri=next(
                 (resource_uri(download_id, 'transcripts', name) for name in item.files if name.endswith('.md')), None
@@ -402,7 +410,9 @@ def summary_text(summary: dict) -> str:
         line = f'Transcription of {media_name}: {item["status"]}'
         if item['error']:
             line += f' ({item["error_code"]}): {item["error"]}'
-        if item['cost_usd'] is not None:
+        if item['cost_usd'] is not None and item['cost_estimated'] is False:
+            line += f', cost ${item["cost_usd"]:.6f} as reported by the provider'
+        elif item['cost_usd'] is not None:
             line += f', estimated cost ${item["cost_usd"]:.4f}'
         lines.append(line)
         lines += [f'  warning: {warning}' for warning in item['warnings']]

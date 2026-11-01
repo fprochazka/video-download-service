@@ -53,6 +53,20 @@ def answer(entries=None, language='eng', duration=15.0) -> dict:
     }
 
 
+# The headers of a real answer for 5 s of audio, its ids replaced
+HEADERS = {
+    'transcription-id': 'tr-123',
+    'character-cost': '1',
+    'fiat-cost-before-overages': '0.000364',
+    'fiat-currency': 'usd',
+    'current-concurrent-requests': '1',
+    'workspace-concurrent-requests': '1',
+    'maximum-concurrent-requests': '12',
+    'x-trace-id': 'trace-456',
+    'x-region': 'us-central1',
+}
+
+
 FIELD_RE = re.compile(
     rb'name="([^"]+)"(?:; filename="([^"]*)")?\r\n(?:Content-Type: ([^\r]*)\r\n)?\r\n(.*?)\r\n--', re.S
 )
@@ -64,6 +78,8 @@ class FakeScribe:
         # A dict is the JSON of a 200, an httpx.Response is sent as it is, an exception is raised; a list is answered
         # one item per request
         self.answer = answer()
+        # The headers of an answer that is a dict
+        self.headers = dict(HEADERS)
 
     def handle(self, request: httpx.Request) -> httpx.Response:
         fields, files = {}, {}
@@ -80,11 +96,11 @@ class FakeScribe:
             raise reply
         if isinstance(reply, httpx.Response):
             return reply
-        return httpx.Response(200, json=reply)
+        return httpx.Response(200, json=reply, headers=self.headers)
 
     def client(self, api_key: str) -> httpx.AsyncClient:
         return httpx.AsyncClient(headers={'xi-api-key': api_key}, transport=httpx.MockTransport(self.handle))
 
 
-def error(status: int, code: str, message: str = 'nope') -> httpx.Response:
-    return httpx.Response(status, json={'detail': {'type': 'error', 'code': code, 'message': message}})
+def error(status: int, code: str, message: str = 'nope', headers: dict | None = None) -> httpx.Response:
+    return httpx.Response(status, json={'detail': {'type': 'error', 'code': code, 'message': message}}, headers=headers)

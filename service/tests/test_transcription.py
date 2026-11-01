@@ -11,7 +11,7 @@ from google.genai import errors
 
 from tests.genai_fakes import API_KEY, response, transcript_lines
 from tests.ytdlp_fakes import read_metadata
-from video_download import audio, cleanup, config, storage, transcription, web
+from video_download import audio, cleanup, config, gemini, storage, transcription, web
 from video_download.subtitles import vtt_cues
 
 JOB_ID = '019a3b2c-4d5e-7f00-8a1b-2c3d4e5f6a7b'
@@ -110,6 +110,21 @@ def test_transcribe_writes_the_transcript_and_records_it(client, downloads_dir, 
             'source': 'https://ai.google.dev/gemini-api/docs/pricing',
         },
     }
+    # Gemini reports usage and ids, no amount of money
+    assert state['provider_report'] == {
+        'requests': 1,
+        'model_versions': ['gemini-3.5-flash-lite-001'],
+        'finish_reasons': {'STOP': 1},
+        'usage_metadata': {
+            'prompt_token_count': 11293,
+            'prompt_tokens_details': {'TEXT': 2369, 'AUDIO': 8924},
+            'candidates_token_count': 4019,
+            'thoughts_token_count': 0,
+            'total_token_count': 15312,
+            'traffic_type': 'ON_DEMAND',
+        },
+        'response_id': 'resp-1',
+    }
     assert state['warnings'] == []
     assert state['files'] == ['Engine_Talk-abc.transcript.md', 'Engine_Talk-abc.transcript.json']
     assert state['started_at'] <= state['completed_at']
@@ -126,6 +141,7 @@ def test_transcribe_writes_the_transcript_and_records_it(client, downloads_dir, 
     assert saved['model'] == 'gemini-3.5-flash-lite'
     assert saved['usage'] == state['usage']
     assert saved['cost'] == state['cost']
+    assert saved['provider_report'] == state['provider_report']
     assert saved['subtitles_reference'] == VTT
     # A segment ends where the next one starts, the last one at its start
     assert [(s['start'], s['end']) for s in saved['segments']] == [(1, 4), (4, 10), (10, 10)]
@@ -721,3 +737,42 @@ def test_left_out_lines_are_a_warning(client, downloads_dir, genai, fake_audio):
     state = state_of(downloads_dir)
     assert state['status'] == 'completed'
     assert [w['code'] for w in state['warnings']] == ['unparsed_lines']
+
+
+def test_the_usage_gemini_reported_is_summed_over_requests():
+    reports = [
+        {
+            'model_version': 'm-1',
+            'response_id': 'a',
+            'finish_reason': 'STOP',
+            'usage_metadata': {
+                'prompt_token_count': 10,
+                'prompt_tokens_details': {'TEXT': 2, 'AUDIO': 8},
+                'cached_content_token_count': 4,
+                'traffic_type': 'ON_DEMAND',
+            },
+        },
+        {
+            'model_version': 'm-2',
+            'response_id': 'b',
+            'finish_reason': 'MAX_TOKENS',
+            'usage_metadata': {
+                'prompt_token_count': 5,
+                'prompt_tokens_details': {'AUDIO': 5},
+                'traffic_type': 'PROVISIONED_THROUGHPUT',
+            },
+        },
+        {'block_reason': 'SAFETY', 'usage_metadata': {'prompt_token_count': 1}},
+    ]
+
+    assert gemini.summary_report(reports) == {
+        'requests': 3,
+        'model_versions': ['m-1', 'm-2'],
+        'finish_reasons': {'STOP': 1, 'MAX_TOKENS': 1, 'SAFETY': 1},
+        'usage_metadata': {
+            'prompt_token_count': 16,
+            'prompt_tokens_details': {'TEXT': 2, 'AUDIO': 13},
+            'cached_content_token_count': 4,
+            'traffic_type': ['ON_DEMAND', 'PROVISIONED_THROUGHPUT'],
+        },
+    }

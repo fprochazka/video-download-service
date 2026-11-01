@@ -154,6 +154,20 @@ def test_a_long_recording_is_transcribed_in_chunks_cut_at_its_chapters(client, d
     }
     assert attempt['problems'] == []
     assert attempt['cost']['usd'] == pytest.approx((8500 * 0.30 + 100 * 2.50) / 1e6)
+    # What Gemini reported about the request
+    assert (attempt['model_version'], attempt['response_id'], attempt['finish_reason']) == (
+        'gemini-3.5-flash-lite-001',
+        'resp-1',
+        'STOP',
+    )
+    assert attempt['usage_metadata'] == {
+        'prompt_token_count': 8500,
+        'prompt_tokens_details': {'TEXT': 1000, 'AUDIO': 7500},
+        'candidates_token_count': 100,
+        'thoughts_token_count': 0,
+        'total_token_count': 8600,
+        'traffic_type': 'ON_DEMAND',
+    }
 
     # The cost is the sum over the requests
     assert state['usage'] == {
@@ -164,6 +178,21 @@ def test_a_long_recording_is_transcribed_in_chunks_cut_at_its_chapters(client, d
     }
     assert state['cost']['usd'] == pytest.approx((34000 * 0.30 + 400 * 2.50) / 1e6)
     assert state['warnings'] == []
+    # The usage Gemini reported, summed over the requests; their response IDs stay in the attempts
+    assert state['provider_report'] == {
+        'requests': 4,
+        'model_versions': ['gemini-3.5-flash-lite-001'],
+        'finish_reasons': {'STOP': 4},
+        'usage_metadata': {
+            'prompt_token_count': 34000,
+            'prompt_tokens_details': {'TEXT': 4000, 'AUDIO': 30000},
+            'candidates_token_count': 400,
+            'thoughts_token_count': 0,
+            'total_token_count': 34400,
+            'traffic_type': 'ON_DEMAND',
+        },
+    }
+    assert saved['provider_report'] == state['provider_report']
     # metadata keeps each chunk's record, the segments are in the transcript
     assert [c['status'] for c in state['chunks']] == ['completed'] * 4
     assert 'segments' not in state['chunks'][0]
@@ -326,6 +355,10 @@ def test_an_unrecoverable_chunk_fails_the_transcription_and_keeps_the_good_chunk
     # Every answered request is paid for, the failed ones too
     assert state['usage']['prompt_tokens'] == 3 * 8500 + 4 * 1000
     assert state['cost']['usd'] > 0
+    report = state['provider_report']
+    assert (report['requests'], report['finish_reasons']) == (7, {'STOP': 7})
+    assert report['usage_metadata']['prompt_token_count'] == state['usage']['prompt_tokens']
+    assert 'response_id' not in report
 
 
 def test_transient_errors_are_sent_again(client, downloads_dir, genai, long_audio):

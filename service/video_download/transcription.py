@@ -529,6 +529,7 @@ def request_transcription(download_dir: Path, media_name: str, model: str) -> di
             'warnings': [],
             'usage': None,
             'cost': None,
+            'provider_report': None,
             # The files of the previous run stay listed until this run replaces them
             'files': current.get('files') or [],
         }
@@ -647,7 +648,7 @@ async def transcribe_whole(provider: Provider, audio_path: Path, duration: float
         raise TranscriptionFailed(e.code, e.message) from e
     log_answer(display_name, response)
     check_finish(response)
-    return parse_transcript(response.text), response.usage
+    return parse_transcript(response.text), response
 
 
 def log_answer(label: str, response: ProviderResponse):
@@ -680,6 +681,8 @@ class TranscriberResult:
     segments: list[dict]
     usage: dict
     cost: dict | None
+    # What the provider itself reported about its requests: ids, billing, usage as it counts it
+    provider_report: dict | None = None
     # The transcriber's own warnings, after those of the checks every transcript gets
     warnings: list[dict] = field(default_factory=list)
     # More fields of the .transcript.json
@@ -707,12 +710,13 @@ class GeminiTranscriber:
 
     async def transcribe(self, recording: Recording) -> TranscriberResult:
         if recording.duration < chunking.CHUNKED_FROM_SECONDS:
-            transcript, usage = await transcribe_whole(
+            transcript, response = await transcribe_whole(
                 self.provider, recording.audio_path, recording.duration, recording.context, recording.download_id
             )
-            segments, unparsed = transcript.segments, transcript.unparsed
+            segments, unparsed, usage = transcript.segments, transcript.unparsed, response.usage
             # Each request is priced on its own, the long-context tier of a model applies per request
             request_usages = [asdict(usage)]
+            reports = [response.report()]
             warnings = []
             fields = {'provider': 'gemini'}
         else:
@@ -727,6 +731,7 @@ class GeminiTranscriber:
             )
             await chunked.run()
             segments, unparsed, request_usages = chunked.segments(), chunked.unparsed(), chunked.request_usages()
+            reports = chunked.request_reports()
             usage = Usage(**{key: sum(u[key] for u in request_usages) for key in asdict(Usage())})
             warnings = chunked.warnings
             fields = {
@@ -743,7 +748,15 @@ class GeminiTranscriber:
                 }
             )
         cost = pricing.estimate(self.model, request_usages, datetime.now(UTC).date())
-        return TranscriberResult(segments, asdict(usage), cost, warnings, fields, check_repeats='chunks' not in fields)
+        return TranscriberResult(
+            segments,
+            asdict(usage),
+            cost,
+            gemini.summary_report(reports),
+            warnings,
+            fields,
+            check_repeats='chunks' not in fields,
+        )
 
 
 class ElevenLabsTranscriber:
@@ -767,11 +780,14 @@ class ElevenLabsTranscriber:
         label = f'{recording.download_id}/{recording.media_name}'
         started = time.monotonic()
         try:
-            answer = await send_with_retries(
+            # The report is of the request that was answered. A retried request that ElevenLabs still billed, such as
+            # a 5xx after the audio was transcribed, is not in it; its cost is unknown.
+            scribe = await send_with_retries(
                 lambda: self.client.transcribe(recording.audio_path, audio.AUDIO_MIME_TYPE, language), label
             )
         except ProviderError as e:
             raise TranscriptionFailed(e.code, e.message) from e
+        answer, report = scribe.body, scribe.report
         latency = round(time.monotonic() - started, 1)
         # Saved before anything else is done with it: the audio is paid for
         words_name = Path(recording.media_name).stem + TRANSCRIPT_WORDS_SUFFIX
@@ -786,12 +802,16 @@ class ElevenLabsTranscriber:
         audio_seconds = float(answer.get('audio_duration_secs') or recording.duration)
         usage = {'audio_seconds': round(audio_seconds, 3)}
         logger.info(
-            'Transcription %s: ElevenLabs answered in %.1f s: language=%s words=%d audio_seconds=%.1f',
+            'Transcription %s: ElevenLabs answered in %.1f s: language=%s words=%d audio_seconds=%.1f cost=%s '
+            'credits=%s transcription_id=%s',
             label,
             latency,
             detected,
             len(words),
             audio_seconds,
+            report.get('cost'),
+            report.get('credits'),
+            report.get('transcription_id'),
         )
         warnings = []
         share = languages.expected_share(' '.join(s['text'] for s in segments), expected)
@@ -809,16 +829,16 @@ class ElevenLabsTranscriber:
             'language_requested': language,
             'language': detected,
             'language_probability': answer.get('language_probability'),
-            'transcription_id': answer.get('transcription_id'),
             'latency_seconds': latency,
             'speakers': [{'id': speaker_id, 'label': name} for speaker_id, name in labels.items()],
             'backchannels': folded,
             'words_file': words_name,
             'chapters': [{'start': start, 'title': title} for start, title in recording.context.chapters],
         }
-        cost = pricing.estimate(self.model, [usage], datetime.now(UTC).date())
+        estimated = pricing.estimate(self.model, [usage], datetime.now(UTC).date())
+        cost = pricing.with_reported(estimated, report.get('cost'))
         check_repeats = recording.duration < chunking.CHUNKED_FROM_SECONDS
-        return TranscriberResult(segments, usage, cost, warnings, fields, check_repeats, files=[words_name])
+        return TranscriberResult(segments, usage, cost, report, warnings, fields, check_repeats, files=[words_name])
 
 
 def make_transcriber(settings: config.TranscriptionSettings) -> Transcriber:
@@ -868,6 +888,7 @@ async def run_pipeline(download_id: str, download_dir: Path, media_name: str, me
         'segments': segments,
         'usage': result.usage,
         'cost': result.cost,
+        'provider_report': result.provider_report,
         'warnings': warnings,
         'created_at': storage.now_iso(),
     } | result.fields
@@ -875,7 +896,7 @@ async def run_pipeline(download_id: str, download_dir: Path, media_name: str, me
     write_atomic(download_dir / json_name, lambda f: json.dump(transcript, f, indent=2, ensure_ascii=False))
     markdown = render_markdown(metadata.get('title'), media_name, transcript, duration)
     write_atomic(download_dir / md_name, lambda f: f.write(markdown))
-    return [md_name, json_name, *result.files], warnings, result.usage, result.cost
+    return [md_name, json_name, *result.files], warnings, result
 
 
 # --- Long recordings: chunks transcribed in parallel, each validated and retried on its own
@@ -1210,9 +1231,7 @@ class ChunkedRun:
         log_answer(label, response)
         record = {
             'latency_seconds': round(time.monotonic() - started, 1),
-            'finish_reason': response.finish_reason,
-            'model_version': response.model_version,
-            'response_id': response.response_id,
+            **response.report(),
             'usage': asdict(response.usage),
             'cost': pricing.estimate(self.provider.model, [asdict(response.usage)], datetime.now(UTC).date()),
         }
@@ -1347,11 +1366,20 @@ class ChunkedRun:
         request_usages = self.request_usages()
         usage = {key: sum(u[key] for u in request_usages) for key in asdict(Usage())}
         cost = pricing.estimate(self.provider.model, request_usages, datetime.now(UTC).date())
-        return TranscriptionFailed(code, message, usage=usage, cost=cost)
+        report = gemini.summary_report(self.request_reports())
+        return TranscriptionFailed(code, message, usage=usage, cost=cost, provider_report=report)
+
+    def answered_attempts(self) -> list[dict]:
+        """Every request that was answered, the retries included: each one is billed"""
+        return [a for state in self.states for a in state['attempts'] if a.get('usage')]
 
     def request_usages(self) -> list[dict]:
-        """Every request that was answered, the retries included: each one is billed"""
-        return [a['usage'] for state in self.states for a in state['attempts'] if a.get('usage')]
+        return [a['usage'] for a in self.answered_attempts()]
+
+    def request_reports(self) -> list[dict]:
+        """What Gemini reported about each answered request, from the attempt records that hold it"""
+        keys = ('model_version', 'response_id', 'finish_reason', 'block_reason', 'usage_metadata')
+        return [{key: a[key] for key in keys if key in a} for a in self.answered_attempts()]
 
     def segments(self) -> list[dict]:
         segments = [segment for index in range(len(self.plan.chunks)) for segment in self.chunk_segments(index)]
@@ -1384,7 +1412,8 @@ async def transcribe_media_task(download_id: str, media_name: str):
             raise TranscriptionFailed('not_configured', ERROR_MESSAGES['not_configured'])
         transcriber = make_transcriber(settings)
         logger.info('Transcription %s/%s started with %s', download_id, media_name, settings.model)
-        files, warnings, usage, cost = await run_pipeline(download_id, download_dir, media_name, metadata, transcriber)
+        files, warnings, result = await run_pipeline(download_id, download_dir, media_name, metadata, transcriber)
+        usage, cost = result.usage, result.cost
         store_result(
             download_dir,
             media_name,
@@ -1394,17 +1423,19 @@ async def transcribe_media_task(download_id: str, media_name: str):
             warnings=warnings,
             usage=usage,
             cost=cost,
+            provider_report=result.provider_report,
             error=None,
             error_code=None,
         )
         for warning in warnings:
             logger.warning('Transcription %s/%s: %s', download_id, media_name, warning['message'])
         logger.info(
-            'Transcription %s/%s completed: usage=%s cost_usd=%s',
+            'Transcription %s/%s completed: usage=%s cost_usd=%s estimated=%s',
             download_id,
             media_name,
             usage,
             cost and cost['usd'],
+            cost and cost['estimated'],
         )
     except asyncio.CancelledError:
         mark_failed(download_dir, download_id, media_name, 'interrupted', ERROR_MESSAGES['interrupted'])

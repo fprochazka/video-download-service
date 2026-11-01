@@ -5,7 +5,7 @@ import logging
 import httpx
 import pytest
 
-from tests.elevenlabs_fakes import API_KEY, answer, error
+from tests.elevenlabs_fakes import API_KEY, HEADERS, answer, error
 from tests.test_transcription import JOB_ID, MEDIA, state_of, transcribe, write_job
 from tests.ytdlp_fakes import read_metadata
 from video_download import audio, elevenlabs, transcription
@@ -41,16 +41,26 @@ def test_transcribes_the_whole_recording_in_one_request(scribe, client, download
     assert (state['provider'], state['model']) == ('elevenlabs', 'scribe_v2')
     assert state['files'] == [MD, JSON, WORDS]
     assert state['usage'] == {'audio_seconds': 15.0}
-    # 15 s at $0.22 per hour
+    # The amount of the response headers, next to the estimate of 15 s at $0.22 per hour
     assert state['cost'] == {
-        'usd': 0.000917,
-        'estimated': True,
+        'usd': 0.000364,
+        'estimated': False,
+        'source': 'provider',
+        'estimate_usd': 0.000917,
         'prices': {
             'model': 'scribe_v2',
             'per_hour': 0.22,
             'as_of': '2026-11-01',
             'source': 'https://elevenlabs.io/pricing/api',
         },
+    }
+    assert state['provider_report'] == {
+        'transcription_id': 'tr-123',
+        'audio_seconds': 15.0,
+        'credits': 1,
+        'region': 'us-central1',
+        'trace_id': 'trace-456',
+        'cost': {'amount': 0.000364, 'currency': 'usd'},
     }
     assert state['warnings'] == []
     metadata = read_metadata(downloads_dir, JOB_ID)
@@ -65,7 +75,9 @@ def test_transcribes_the_whole_recording_in_one_request(scribe, client, download
 
     stored = json.loads((job_dir / JSON).read_text())
     assert stored['provider'] == 'elevenlabs'
-    assert (stored['language_requested'], stored['language'], stored['transcription_id']) == ('en', 'eng', 'tr-123')
+    assert (stored['language_requested'], stored['language']) == ('en', 'eng')
+    assert stored['provider_report'] == state['provider_report']
+    assert stored['cost'] == state['cost']
     assert stored['speakers'] == [{'id': 'speaker_1', 'label': 'Speaker 1'}, {'id': 'speaker_0', 'label': 'Speaker 2'}]
     assert stored['words_file'] == WORDS
     assert stored['segments'] == [
@@ -74,6 +86,74 @@ def test_transcribes_the_whole_recording_in_one_request(scribe, client, download
     ]
     assert json.loads((job_dir / WORDS).read_text()) == answer()
     assert API_KEY not in caplog.text
+    assert API_KEY not in (job_dir / 'metadata.json').read_text() + (job_dir / JSON).read_text()
+
+
+def report_of(headers: dict) -> dict:
+    return elevenlabs.provider_report(httpx.Headers(headers), {'audio_duration_secs': 5.0135})
+
+
+def test_the_report_has_what_the_headers_say():
+    assert report_of(HEADERS | {'fiat-currency': ' USD '}) == {
+        'transcription_id': 'tr-123',
+        'audio_seconds': 5.0135,
+        'credits': 1,
+        'region': 'us-central1',
+        'trace_id': 'trace-456',
+        'cost': {'amount': 0.000364, 'currency': 'usd'},
+    }
+    # Missing headers are left out, the transcription_id of the body stands in
+    assert elevenlabs.provider_report(httpx.Headers({}), {'transcription_id': 'tr-body'}) == {
+        'transcription_id': 'tr-body'
+    }
+    assert report_of(HEADERS | {'character-cost': '2.5'})['credits'] == 2.5
+
+
+@pytest.mark.parametrize(
+    'headers',
+    [
+        {'fiat-cost-before-overages': 'n/a'},
+        {'fiat-cost-before-overages': 'nan'},
+        {'fiat-cost-before-overages': '-0.1'},
+        {'fiat-cost-before-overages': ''},
+        {'fiat-currency': ''},
+        {'fiat-currency': '  '},
+    ],
+)
+def test_a_malformed_amount_or_currency_is_no_reported_cost(headers):
+    report = report_of(HEADERS | headers)
+
+    assert 'cost' not in report
+    assert report['credits'] == 1
+
+
+def test_an_unparsable_credit_count_is_left_out():
+    assert 'credits' not in report_of(HEADERS | {'character-cost': 'many'})
+
+
+@pytest.mark.parametrize(
+    ('headers', 'reported'),
+    [
+        ({'fiat-cost-before-overages': None, 'fiat-currency': None}, None),
+        ({'fiat-cost-before-overages': 'oops'}, None),
+        ({'fiat-currency': 'eur'}, {'amount': 0.000364, 'currency': 'eur'}),
+    ],
+)
+def test_without_an_amount_in_usd_the_cost_is_the_estimate(
+    scribe, client, downloads_dir, fake_audio, headers, reported
+):
+    scribe.headers = {key: value for key, value in (HEADERS | headers).items() if value is not None}
+    write_job(downloads_dir)
+
+    transcribe(client)
+
+    state = state_of(downloads_dir)
+    assert state['status'] == 'completed'
+    assert (state['cost']['usd'], state['cost']['estimated']) == (0.000917, True)
+    assert 'source' not in state['cost']
+    # An amount in another currency stays in the report
+    assert state['provider_report'].get('cost') == reported
+    assert state['provider_report']['credits'] == 1
 
 
 def test_status_offers_transcription_with_the_selected_providers_key(scribe, client, downloads_dir):
@@ -190,13 +270,18 @@ def test_errors_fail_the_transcription_at_once(scribe, client, downloads_dir, fa
 
 
 def test_rate_limits_and_server_errors_are_sent_again(scribe, client, downloads_dir, fake_audio):
-    scribe.answer = [error(429, 'concurrent_limit_exceeded'), httpx.ConnectError('down'), answer()]
+    billed = {'transcription-id': 'tr-failed', 'fiat-cost-before-overages': '0.5', 'fiat-currency': 'usd'}
+    scribe.answer = [error(503, 'overloaded', headers=billed), httpx.ConnectError('down'), answer()]
     write_job(downloads_dir)
 
     transcribe(client)
 
-    assert state_of(downloads_dir)['status'] == 'completed'
+    state = state_of(downloads_dir)
+    assert state['status'] == 'completed'
     assert len(scribe.requests) == 3
+    # Only the answered request is reported
+    assert state['provider_report']['transcription_id'] == 'tr-123'
+    assert state['cost']['usd'] == 0.000364
 
 
 def test_a_rate_limit_that_lasts_fails_as_rate_limited(scribe, client, downloads_dir, fake_audio):
@@ -241,3 +326,17 @@ def test_a_gemini_transcript_after_a_scribe_one_replaces_its_files(
     metadata = read_metadata(downloads_dir, JOB_ID)
     assert metadata['transcriptions'][MEDIA]['provider'] == 'gemini'
     assert [a['name'] for a in metadata['artifacts'] if a['kind'] == 'transcript'] == [MD, JSON]
+
+
+def test_status_has_the_reported_cost_and_the_report(scribe, client, downloads_dir, fake_audio):
+    write_job(downloads_dir)
+    transcribe(client)
+
+    state = client.get(f'/status/{JOB_ID}').json()['transcriptions'][MEDIA]
+
+    def without_nulls(entry: dict) -> dict:
+        return {key: without_nulls(v) if isinstance(v, dict) else v for key, v in entry.items() if v is not None}
+
+    stored = state_of(downloads_dir)
+    assert without_nulls(state['cost']) == stored['cost']
+    assert without_nulls(state['provider_report']) == stored['provider_report']

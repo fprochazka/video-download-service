@@ -5,8 +5,9 @@ Scribe computes word timestamps and keeps one speaker label per person across th
 cut into chunks. See docs/transcription-models.md for how it compares with Gemini.
 """
 
+import math
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import httpx
@@ -30,6 +31,47 @@ def http_client(api_key: str) -> httpx.AsyncClient:
 
 
 @dataclass
+class ScribeAnswer:
+    # The JSON of the answer
+    body: dict
+    # What ElevenLabs reported about the request in the headers and the body, see provider_report
+    report: dict = field(default_factory=dict)
+
+
+def number(value: str | None) -> float | None:
+    """A header's finite, non-negative number, None when it is missing or anything else"""
+    try:
+        result = float(value) if value is not None else None
+    except ValueError:
+        return None
+    return result if result is not None and math.isfinite(result) and result >= 0 else None
+
+
+def provider_report(headers: httpx.Headers, body: dict) -> dict:
+    """What ElevenLabs reported about one answered request: its cost and credits, the ids to quote to its support, and
+    the audio length it billed; the keys it did not report are left out.
+
+    fiat-cost-before-overages is the amount of money of the request, before what a plan's overage pricing adds, and
+    character-cost the credits it took from the plan. The response carries no other price information."""
+    report = {
+        'transcription_id': headers.get('transcription-id') or body.get('transcription_id'),
+        'audio_seconds': body.get('audio_duration_secs'),
+        'credits': number(headers.get('character-cost')),
+        'region': headers.get('x-region'),
+        'trace_id': headers.get('x-trace-id'),
+    }
+    amount = number(headers.get('fiat-cost-before-overages'))
+    currency = (headers.get('fiat-currency') or '').strip().lower()
+    if amount is not None and currency:
+        report['cost'] = {'amount': amount, 'currency': currency}
+    if report['credits'] is not None and report['credits'].is_integer():
+        report['credits'] = int(report['credits'])
+    if not isinstance(report['audio_seconds'], int | float):
+        report['audio_seconds'] = None
+    return {key: value for key, value in report.items() if value is not None}
+
+
+@dataclass
 class ElevenLabsClient:
     api_key: str
     model: str
@@ -47,8 +89,8 @@ class ElevenLabsClient:
             fields['language_code'] = language
         return fields
 
-    async def transcribe(self, audio: Path, mime_type: str, language: str | None) -> dict:
-        """The answer's JSON; raises ProviderError with an error_code of the transcription"""
+    async def transcribe(self, audio: Path, mime_type: str, language: str | None) -> ScribeAnswer:
+        """The answer and its report; raises ProviderError with an error_code of the transcription"""
         try:
             async with http_client(self.api_key) as client:
                 with audio.open('rb') as file:
@@ -75,7 +117,7 @@ class ElevenLabsClient:
             raise ProviderError('invalid_response', 'ElevenLabs answered with something other than JSON.') from e
         if not isinstance(answer, dict) or not isinstance(answer.get('words'), list):
             raise ProviderError('invalid_response', 'The answer of ElevenLabs has no words.')
-        return answer
+        return ScribeAnswer(answer, provider_report(response.headers, answer))
 
 
 def error_detail(response: httpx.Response) -> tuple[str | None, str]:
