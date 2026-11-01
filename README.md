@@ -63,6 +63,8 @@ The downloads directory defaults to `./downloads` and can be changed with the `D
 
 Downloads run in an in-process worker, at most `DOWNLOAD_CONCURRENCY` (default `2`) at the same time; further jobs wait as `pending`. Transcriptions have their own queue, limited by `TRANSCRIPTION_CONCURRENCY` (default `2`); the chunks of a long recording run `TRANSCRIPTION_CHUNK_CONCURRENCY` (default `4`) at a time within one transcription. The queue lives in memory: jobs still queued or running when the service stops are marked `interrupted` on the next start.
 
+Measured results of the transcription experiments, and the research behind the design, are in `docs/`: [models](docs/transcription-models.md), [chunking](docs/transcription-chunking.md) and [research notes](docs/research.md). Add a new experiment's findings there, with its date and test recordings.
+
 ## Running the Application
 
 ### Using UV (Local Development)
