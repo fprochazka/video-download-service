@@ -240,7 +240,7 @@ async def test_file_urls_fall_back_to_the_forwarded_host_of_the_request(download
 @pytest.mark.anyio
 async def test_download_video_rejects_a_playlist_without_creating_a_job(downloads_dir):
     async with running_app(), mcp_client() as client:
-        with pytest.raises(ToolError, match='Playlists and channels are not supported'):
+        with pytest.raises(ToolError, match='Playlists, channels, profiles and other collections are not supported'):
             await client.call_tool('download_video', {'url': 'https://www.youtube.com/playlist?list=PLx0sYbCqOb8T'})
 
     assert list(downloads_dir.iterdir()) == []

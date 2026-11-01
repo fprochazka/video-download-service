@@ -1,4 +1,4 @@
-"""Validation of submitted URLs and the reduction of YouTube playlist links to a single video"""
+"""Validation of submitted URLs: links to collections are rejected, YouTube playlist links reduced to the video"""
 
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
@@ -6,7 +6,9 @@ from yt_dlp.extractor import gen_extractor_classes
 from yt_dlp.extractor.youtube import YoutubeIE
 
 PLAYLIST_QUERY_PARAMS = {'list', 'index', 'start_radio', 'pp', 'playnext'}
-PLAYLIST_REJECTED_MESSAGE = 'Playlists and channels are not supported, paste a link to a single video.'
+PLAYLIST_REJECTED_MESSAGE = (
+    'Playlists, channels, profiles and other collections are not supported, paste a link to a single video or post.'
+)
 
 
 class InvalidDownloadUrl(ValueError):
@@ -30,9 +32,11 @@ def strip_playlist_params(url: str) -> str:
 def resolve_download_url(url: str) -> tuple[str, str]:
     """Return (url to pass to yt-dlp, extractor key), or raise InvalidDownloadUrl.
 
-    YouTube links that carry a playlist next to a video (mixes, "play all", music radio) are reduced to the video.
-    Pure playlist and channel links are rejected. Other sites are left untouched, an Instagram carousel is a playlist
-    too and has to keep working.
+    A link whose extractor returns only collections (profiles, channels, albums, playlists) is rejected, even when the
+    collection holds one video. Extractors of a single post that may carry several videos, like an Instagram carousel
+    or a tweet, declare "any" and are allowed.
+    YouTube links that carry a playlist next to a video (mixes, "play all", music radio) are reduced to the video, and
+    pure YouTube playlist and channel links are rejected; YouTube's tab extractor declares "any", so it needs this rule.
     """
     parts = urlsplit(url)
     if parts.scheme not in ('http', 'https') or not parts.netloc:
@@ -40,6 +44,8 @@ def resolve_download_url(url: str) -> tuple[str, str]:
 
     extractor = detect_extractor(url)
     if not extractor.ie_key().startswith('Youtube'):
+        if getattr(extractor, '_RETURN_TYPE', None) == 'playlist':
+            raise InvalidDownloadUrl(PLAYLIST_REJECTED_MESSAGE)
         return url, extractor.ie_key()
 
     stripped = strip_playlist_params(url)

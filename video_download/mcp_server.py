@@ -96,7 +96,7 @@ def download_video_description(transcription: bool) -> str:
             'Download one video, or one post with several videos, from any site yt-dlp supports: video platforms, '
             'social networks and more.',
             'Pass a link to that one video or post. Do not pass links to playlists, channels, profiles or other '
-            'collections, the service rejects those it recognizes. A video link that also refers to a playlist '
+            'collections, they are rejected even when they hold one video. A video link that also refers to a playlist '
             'downloads only the video.',
             'A download takes from seconds to several minutes'
             + (', longer with transcribe.' if transcription else '.'),

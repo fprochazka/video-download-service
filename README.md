@@ -14,7 +14,7 @@ A simple web service for downloading videos from various platforms using yt-dlp 
 - **Best quality** - Downloads the best video and audio streams and merges them into mp4 with ffmpeg
 - **Subtitles and details** - Each job also downloads the subtitles in the video's own language and in English, and the video details yt-dlp extracted (`info.json`). A manual subtitle track wins over automatic captions of the same language; of the automatic captions only the speech recognition track (YouTube's `<lang>-orig`) and the English one are taken, never the ~100 machine translations. A failed subtitle download does not fail the job, the error is in `subtitles_error`
 - **File list with delete** - The job page lists the files grouped as media, subtitles and details, with their size, a download link and a delete button. Deleted files stay listed as deleted, with the date
-- **Single videos only** - A YouTube link to a video inside a playlist or mix downloads just that video; playlist and channel links are rejected. Other sites are untouched, so Instagram carousels still download all their items
+- **Single videos only** - Links to playlists, channels, profiles, albums and other collections are rejected, even when the collection holds one video. The service asks yt-dlp whether the link's extractor returns only collections, so this works on every site yt-dlp supports. A single post with several videos, like an Instagram carousel, is not a collection and downloads all its items. A YouTube link to a video inside a playlist or mix downloads just that video
 - **Error handling** - Failed downloads are tracked in metadata with the error message and a machine-readable `error_code`, and logged to the service log
 - **Download status states**:
   - `pending` - Download queued
@@ -389,7 +389,7 @@ The endpoint has no authentication and no CSRF token, because the service is rea
 
 Tools:
 
-- `download_video(url, transcribe=false)` - starts a job for a link to one video or one post, with the same URL rules as the web form: a link to a playlist or a channel that the service recognizes is a tool error. With `transcribe` set, the service transcribes every media file of the job once the download completes. A client without task support gets the job at once; see [MCP tasks](#mcp-tasks) for the others.
+- `download_video(url, transcribe=false)` - starts a job for a link to one video or one post, with the same URL rules as the web form: a link to a playlist, channel, profile or other collection is a tool error. With `transcribe` set, the service transcribes every media file of the job once the download completes. A client without task support gets the job at once; see [MCP tasks](#mcp-tasks) for the others.
 - `get_job(download_id, wait_seconds=0)` - the job's state, the video's title, duration and uploader, the error and `error_code` of a failed job, the files with their kind, size and URL, and each transcription with its state and estimated cost. With `wait_seconds` (0 to 60) the tool answers once the job changes or ends, so an agent needs fewer calls.
 - `transcribe_file(download_id, filename)` - transcribes one media file of a completed job, with the same rules as the Transcribe button. It replaces an earlier transcript of the file.
 
@@ -490,7 +490,7 @@ video-download/
   - Accepts: `url` form parameter
   - Requires the CSRF token, see below
   - Returns: `{"download_id": "uuid"}`
-  - Returns HTTP 400 with `{"detail": "..."}` for a non-http(s) URL or a YouTube playlist/channel link, no job is created
+  - Returns HTTP 400 with `{"detail": "..."}` for a non-http(s) URL or a link to a collection (playlist, channel, profile, album), no job is created
 - `GET /status/{download_id}` - Check download status
   - Returns: Status object with download state, files, metadata, errors; 404 for an unknown id, 422 for a malformed one
 - `GET /downloads/{download_id}/{filename}` - Download a specific file

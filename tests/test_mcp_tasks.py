@@ -146,7 +146,7 @@ async def test_task_methods_need_the_extension_on_the_request(downloads_dir):
 @pytest.mark.anyio
 async def test_a_rejected_url_is_a_tool_error_and_not_a_task(downloads_dir):
     async with running_app(), tasks_client() as client:
-        with pytest.raises(ToolError, match='Playlists and channels are not supported'):
+        with pytest.raises(ToolError, match='Playlists, channels, profiles and other collections are not supported'):
             await client.call_tool('download_video', {'url': 'https://www.youtube.com/playlist?list=PLx0s'})
 
     assert list(downloads_dir.iterdir()) == []

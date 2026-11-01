@@ -18,7 +18,9 @@ from tests.ytdlp_fakes import (
 from video_download import config, errors, storage, urls, web, ytdlp
 
 VIDEO_URL = 'https://www.youtube.com/watch?v=dQw4w9WgXcQ'
-PLAYLIST_REJECTED = 'Playlists and channels are not supported, paste a link to a single video.'
+PLAYLIST_REJECTED = (
+    'Playlists, channels, profiles and other collections are not supported, paste a link to a single video or post.'
+)
 
 
 @pytest.mark.parametrize(
@@ -48,6 +50,18 @@ PLAYLIST_REJECTED = 'Playlists and channels are not supported, paste a link to a
             'https://www.instagram.com/p/ABC123/?img_index=2&list=keep',
             'https://www.instagram.com/p/ABC123/?img_index=2&list=keep',
         ),
+        ('https://www.instagram.com/reel/ABC123/', 'https://www.instagram.com/reel/ABC123/'),
+        ('https://www.instagram.com/someuser/', None),
+        (
+            'https://www.tiktok.com/@user/video/7123456789012345678',
+            'https://www.tiktok.com/@user/video/7123456789012345678',
+        ),
+        ('https://www.tiktok.com/@user', None),
+        ('https://vimeo.com/123456789', 'https://vimeo.com/123456789'),
+        ('https://vimeo.com/showcase/123', None),
+        ('https://vimeo.com/channels/staffpicks', None),
+        ('https://x.com/someone/status/1234567890', 'https://x.com/someone/status/1234567890'),
+        ('https://example.com/some/page', 'https://example.com/some/page'),
     ],
 )
 def test_resolve_download_url(url, expected):
