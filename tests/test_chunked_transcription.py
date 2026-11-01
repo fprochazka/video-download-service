@@ -417,3 +417,29 @@ def test_without_speech_detection_the_cuts_are_hard(client, downloads_dir, genai
     # The checks of the whole transcript still see the missing end
     assert [w['code'] for w in state['warnings']] == ['ends_early']
     assert read_metadata(downloads_dir, JOB_ID)['transcriptions'][MEDIA]['chunks'][1]['start'] == 300.0
+
+
+def test_an_answer_in_another_script_fails_the_check_and_is_sent_again(client, downloads_dir, genai, long_audio):
+    job_dir = long_job(downloads_dir)
+    sent = []
+
+    def answers(contents):
+        start, end = chunk_range(contents)
+        sent.append(start)
+        text = lines_for(start, end)
+        if start == 300.0 and sent.count(start) == 1:
+            # Transliterated into Cyrillic instead of the expected English
+            text = text.replace('Words at', 'Слова при').replace('here', 'здесь')
+        return answer(start, end, text)
+
+    genai.answer = answers
+
+    transcribe(client)
+
+    state = state_of(downloads_dir)
+    assert state['status'] == 'completed'
+    attempts = state['chunks'][1]['attempts']
+    assert [p['code'] for p in attempts[0]['problems']] == ['wrong_script']
+    assert 'English (en) is not written in' in attempts[0]['problems'][0]['message']
+    assert attempts[1]['problems'] == []
+    assert 'Слова' not in (job_dir / 'Engine_Talk-abc.transcript.md').read_text()

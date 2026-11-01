@@ -177,6 +177,8 @@ def test_request_settings_follow_the_known_gemini_failure_modes(client, download
     assert audio_part.file_data.file_uri == 'https://fake/files/fake1'
     assert isinstance(prompt, str)
     assert 'untrusted' in generation.system_instruction
+    # The job has English subtitles
+    assert '- The speech is in English (en).' in generation.system_instruction
 
 
 def test_model_comes_from_env(client, downloads_dir, genai, fake_audio, monkeypatch):

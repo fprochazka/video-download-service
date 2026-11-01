@@ -339,6 +339,7 @@ Each answer is checked before it is used:
 - Gemini read 25 (or 32) audio tokens per second of the chunk, so it read the right audio
 - no timestamp lies past the end of the chunk, and none goes back more than 5 seconds. A few out-of-line timestamps (an hour digit in a chunk of minutes, a few lines minutes ahead) are moved between their neighbors, at most 10% of the lines
 - no line of four or more words occurs more than three times
+- at least half of its letters are in a script of the expected languages (`wrong_script` otherwise), so a Czech or English recording that comes back in Cyrillic, Greek, Japanese or Arabic letters is sent again. The check knows the scripts of about 50 languages and skips any other
 - no stretch of more than 30 seconds of speech, as Silero found it, lies between two consecutive lines
 
 A chunk that fails a check is sent again. If the second answer fails too, the chunk is split at its longest pause near the middle, and both halves are sent, twice each if needed. If a half fails both times, the transcription fails with `chunk_failed`. A request that hits a rate limit, a server error or a network failure is sent again after 10 and after 30 seconds; a rejected request fails the transcription at once.
@@ -377,6 +378,7 @@ The default comes from a comparison on that video, scored against its manual sub
 
 - the audio of the media file, mono 16 kHz Opus. A recording under 7 minutes is uploaded to the Files API and deleted right after the request; the chunks of a longer one go inline in their requests
 - the title, uploader, channel, description and chapters of the video
+- the expected languages of the speech: the `language` of `info.json`, of YouTube's speech recognition track and of manual subtitle tracks, not of machine translations. The system instruction names them and tells the model to write each language as spoken, never translated or transliterated, with its diacritics. The same sentence at the start of the prompt made Gemini write every timestamp of one chunk a minute late, in 5 of 5 answers
 - the text of one subtitle track of the job (a manual track first, else the speech recognition track), as a reference that may be wrong. Its timestamps are left out: subtitles timed for another edit of the video made Gemini copy their times
 
 The video's own text goes into the prompt in tagged blocks with `<`, `>` and `&` escaped, and the instructions tell the model to treat it as data. A description that contains instructions therefore cannot end its block, but a model can still be influenced by text it reads.
@@ -387,7 +389,7 @@ The video's own text goes into the prompt in tagged blocks with `<`, `>` and `&`
 - Speaker labels are `Speaker 1`, `Speaker 2` unless the audio or the description names the speaker. In a long recording they start again in each chunk.
 - The checks of a chunk catch an answer that skipped a passage of speech, but not one that drops the last few seconds of a chunk or a single sentence.
 - A recording without subtitles has no reference to compare the chunks with, only their text per minute of speech.
-- Chunking was tested on one English recording. Czech and other languages are untested; the check of text per minute of speech compares chunks with each other, so it does not depend on the language.
+- Chunking and the language hint were tested on one English recording. Czech and other languages are untested, no Czech test recording was at hand; the check of text per minute of speech compares chunks with each other, so it does not depend on the language.
 - An answer that loops ends at the output limit the service sets, 1,300 tokens per minute of audio. A recording under 7 minutes then fails with `output_truncated`; a chunk of a longer one is sent again.
 
 The service checks the result and stores warnings in `warnings`; they do not fail the transcription:
@@ -494,6 +496,7 @@ video-download/
 │   ├── pricing.py       # List prices and the estimated cost of a transcription
 │   ├── audio.py         # ffmpeg audio extraction and ffprobe duration
 │   ├── vad.py           # Speech and pauses of a recording, from Silero VAD or ffmpeg silencedetect
+│   ├── languages.py     # Expected languages of a recording and the scripts they are written in
 │   ├── ytdlp.py         # yt-dlp options and the files and metadata a download produced
 │   ├── subtitles.py     # Which subtitle tracks a job downloads
 │   ├── cleanup.py       # Garbage collection of large old media

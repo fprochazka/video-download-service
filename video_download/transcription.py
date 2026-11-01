@@ -21,7 +21,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Protocol
 
-from video_download import audio, chunking, config, gemini, pricing, storage, vad
+from video_download import audio, chunking, config, gemini, languages, pricing, storage, vad
 from video_download.gemini import ProviderError, ProviderResponse, TranscriptionRequest, Usage
 from video_download.storage import (
     INFO_FILENAME,
@@ -121,6 +121,8 @@ class Context:
     subtitles: list[tuple[float, str]] = field(default_factory=list)
     # The words of the same track with their times, for where to cut a long recording
     caption_words: list[CaptionWord] = field(default_factory=list)
+    # Codes of the languages the recording is expected to be in, the spoken one first
+    languages: list[str] = field(default_factory=list)
 
 
 def escape_untrusted(text: str) -> str:
@@ -155,13 +157,26 @@ def pick_subtitles(download_dir: Path, artifacts: list[dict]) -> tuple[str | Non
     return None, [], []
 
 
+def expected_languages(info: dict, artifacts: list[dict]) -> list[str]:
+    """The language of info.json, then those of YouTube's speech recognition track and of manual subtitles; machine
+    translations of the captions say nothing about what is spoken"""
+    codes = [languages.language_code(info.get('language'))]
+    for entry in artifacts:
+        if entry.get('kind') != SUBTITLE or not entry.get('lang'):
+            continue
+        if not entry.get('auto') or entry['lang'].endswith(ORIGINAL_AUTO_SUFFIX):
+            codes.append(languages.language_code(entry['lang']))
+    return list(dict.fromkeys(code for code in codes if code))
+
+
 def build_context(download_dir: Path, metadata: dict) -> Context:
     info = read_info(download_dir)
     chapters = []
     for chapter in (info.get('chapters') or [])[:MAX_CHAPTERS]:
         if isinstance(chapter, dict) and chapter.get('title'):
             chapters.append((float(chapter.get('start_time') or 0), str(chapter['title'])))
-    track, cues, words = pick_subtitles(download_dir, job_artifacts(download_dir, metadata))
+    artifacts = job_artifacts(download_dir, metadata)
+    track, cues, words = pick_subtitles(download_dir, artifacts)
     return Context(
         title=metadata.get('title'),
         uploader=metadata.get('uploader'),
@@ -171,6 +186,7 @@ def build_context(download_dir: Path, metadata: dict) -> Context:
         subtitles_track=track,
         subtitles=cues,
         caption_words=words,
+        languages=expected_languages(info, artifacts),
     )
 
 
@@ -197,6 +213,26 @@ changes, and name the speaker on every line.
 when the audio or the context makes clear who is speaking.
 - The reference subtitles may be wrong or incomplete. When they disagree with the audio, the audio decides.
 - Leave out music, noise and silence."""
+
+
+def system_instruction(codes: list[str]) -> str:
+    """The rules, with the expected languages as one more rule. In the system instruction and not in the prompt: in
+    the prompt, the same sentence made Gemini write every timestamp of a chunk a minute late in 5 of 5 answers."""
+    if not codes:
+        return SYSTEM_INSTRUCTION
+    expected = 'is in ' + codes_text(codes) if len(codes) == 1 else 'is expected to be in ' + codes_text(codes)
+    return (
+        f'{SYSTEM_INSTRUCTION}\n- The speech {expected}. Write each language as it is spoken: never translate or '
+        'transliterate it, and keep its diacritics.'
+    )
+
+
+def codes_text(codes: list[str]) -> str:
+    return (
+        languages.describe(codes)
+        if len(codes) == 1
+        else languages.describe(codes[:-1]) + ' or ' + languages.describe(codes[-1:])
+    )
 
 
 def block(tag: str, text: str | None) -> str:
@@ -587,7 +623,7 @@ async def transcribe_whole(provider: Provider, audio_path: Path, duration: float
     request = TranscriptionRequest(
         audio=audio_path,
         mime_type=audio.AUDIO_MIME_TYPE,
-        system_instruction=SYSTEM_INSTRUCTION,
+        system_instruction=system_instruction(context.languages),
         prompt=build_prompt(context, duration),
         max_output_tokens=max_output_tokens(duration),
         display_name=display_name,
@@ -746,10 +782,14 @@ def problem(code: str, message: str) -> dict:
 
 
 def answer_problems(
-    response: ProviderResponse, transcript: ChunkTranscript | None, duration: float, speech: list | None
+    response: ProviderResponse,
+    transcript: ChunkTranscript | None,
+    duration: float,
+    speech: list | None,
+    expected: list[str] | None = None,
 ) -> list[dict]:
     """What is wrong with the answer for a chunk of this duration; speech is the chunk's speech regions from Silero,
-    from 0, or None when they are not known well enough to judge by"""
+    from 0, or None when they are not known well enough to judge by; expected the codes of the expected languages"""
     problems = []
     usage = response.usage
     if usage.prompt_tokens <= 0:
@@ -776,6 +816,14 @@ def answer_problems(
         problems.append(problem('repeated_text', f'A line is repeated {repeats} times.'))
     if transcript.unparsed > max(5, len(starts) // 10):
         problems.append(problem('unparsed_lines', f'{transcript.unparsed} lines were not transcript lines.'))
+    share = languages.expected_share(' '.join(s['text'] for s in transcript.segments), expected or [])
+    if share is not None and share < languages.MIN_EXPECTED_SHARE:
+        problems.append(
+            problem(
+                'wrong_script',
+                f'{1 - share:.0%} of the letters are in a script that {languages.describe(expected)} is not written in.',
+            )
+        )
     if speech is not None:
         blind = chunking.largest_blind_speech(starts, speech, 0, duration)
         if blind > MAX_BLIND_SPEECH_SECONDS:
@@ -959,7 +1007,7 @@ class ChunkedRun:
         request = TranscriptionRequest(
             audio=path,
             mime_type=audio.AUDIO_MIME_TYPE,
-            system_instruction=SYSTEM_INSTRUCTION,
+            system_instruction=system_instruction(self.context.languages),
             prompt=prompt,
             max_output_tokens=max_output_tokens(part.duration),
             display_name=f'{self.download_id}-{part.index}',
@@ -991,7 +1039,8 @@ class ChunkedRun:
             problems.append(problem(e.code, e.message))
         if transcript is not None and (repaired := repair_timestamps(transcript, part.duration)):
             transcript, record['repaired_timestamps'] = repaired
-        problems += answer_problems(response, transcript, part.duration, self.speech_within(part.start, part.end))
+        speech = self.speech_within(part.start, part.end)
+        problems += answer_problems(response, transcript, part.duration, speech, self.context.languages)
         record['problems'] = problems
         if problems:
             logger.warning('Transcription %s failed its checks: %s', label, '; '.join(p['message'] for p in problems))
