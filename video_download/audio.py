@@ -38,9 +38,9 @@ async def run(args: list[str], timeout: float, cwd: Path | None = None) -> tuple
     return process.returncode, stdout, stderr
 
 
-async def extract_audio(media: Path, target: Path):
-    """Write the audio of media to target as 16 kHz mono Opus; raises AudioExtractionError"""
-    args = ['ffmpeg', '-nostdin', '-hide_banner', '-loglevel', 'error', '-y', '-i', str(media), *FFMPEG_AUDIO_ARGS]
+async def write_audio(input_args: list[str], target: Path):
+    """Run ffmpeg on input_args and write 16 kHz mono Opus to target; raises AudioExtractionError"""
+    args = ['ffmpeg', '-nostdin', '-hide_banner', '-loglevel', 'error', '-y', *input_args, *FFMPEG_AUDIO_ARGS]
     try:
         code, _, stderr = await run([*args, str(target)], FFMPEG_TIMEOUT_SECONDS)
     except FileNotFoundError as e:
@@ -50,6 +50,17 @@ async def extract_audio(media: Path, target: Path):
     if code != 0 or not target.is_file() or target.stat().st_size == 0:
         message = stderr.decode('utf-8', 'replace').strip().splitlines()[-3:]
         raise AudioExtractionError(f'ffmpeg exited with {code}: ' + (' '.join(message) or 'no audio was written'))
+
+
+async def extract_audio(media: Path, target: Path):
+    """Write the audio of media to target as 16 kHz mono Opus; raises AudioExtractionError"""
+    await write_audio(['-i', str(media)], target)
+
+
+async def cut_audio(source: Path, target: Path, start: float, end: float):
+    """Write [start, end) of the audio to target as its own file starting at 0, re-encoded so the cut is exact;
+    raises AudioExtractionError"""
+    await write_audio(['-ss', f'{start:.3f}', '-to', f'{end:.3f}', '-i', str(source)], target)
 
 
 async def probe_duration(path: Path) -> float | None:

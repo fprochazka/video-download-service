@@ -118,6 +118,8 @@ const EVIL_MEDIA = '"><img src=x onerror=alert(1)>.mp4';
             'transcription-running': { status: 'running', model: 'gemini-3.5-flash-lite', files: [] },
             'transcription-failed': {
                 status: 'failed', error: 'Gemini API error 429 <RESOURCE_EXHAUSTED>', error_code: 'rate_limited', files: [],
+                usage: { prompt_tokens: 1000, prompt_audio_tokens: 750, output_tokens: 200, thinking_tokens: 0 },
+                cost: { usd: 0.0008, estimated: true, prices: { model: 'gemini-3.5-flash-lite', input_text: 0.3, input_audio: 0.3, output: 2.5, as_of: '2026-10-30' } },
             },
             'transcription-completed': {
                 status: 'completed', model: 'gemini-3.5-flash-lite', files: transcriptArtifacts.map((a) => a.name),

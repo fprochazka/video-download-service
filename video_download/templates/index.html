@@ -361,7 +361,8 @@
         const TRANSCRIPTION_HINTS = {
             not_configured: 'Set GEMINI_API_KEY in app.env on the server (see README) and restart it.',
             rate_limited: 'Gemini is rate-limiting the API key, try again in a minute.',
-            output_truncated: 'The recording is too long for one request, transcribing in parts is not supported yet.',
+            output_truncated: 'The answer hit the output token limit, try again.',
+            chunk_failed: 'Gemini gave no usable answer for a part of the recording, even after retries; try again.',
             blocked: 'Gemini refused the content (safety or recitation filter).',
             invalid_response: 'Gemini returned a malformed transcript, try again.',
             provider_error: 'The Gemini API failed, try again later.',
@@ -507,6 +508,8 @@
                 const hint = TRANSCRIPTION_HINTS[transcription.error_code];
                 return '<div class="file-transcription failed">'
                     + `Transcription failed: ${escapeHtml(transcription.error || 'unknown error')}`
+                    // A long recording fails after some of its parts were transcribed and paid for
+                    + renderCost(transcription)
                     + (hint ? `<br><small>${escapeHtml(hint)}</small>` : '')
                     + '</div>';
             }

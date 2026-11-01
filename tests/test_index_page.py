@@ -154,13 +154,13 @@ def test_running_transcription_shows_its_state_and_keeps_polling(page_script):
     assert (result['intervals'], result['clears']) == (1, 0)
 
 
-def test_failed_transcription_shows_the_error_escaped_with_a_hint(page_script):
+def test_failed_transcription_shows_the_error_escaped_with_a_hint_and_what_it_cost(page_script):
     result = run_scenario(page_script, 'transcription-failed')
 
     (state,) = result['transcriptions']
     assert state == (
-        'Transcription failed: Gemini API error 429 &lt;RESOURCE_EXHAUSTED&gt;|'
-        '|Gemini is rate-limiting the API key, try again in a minute.|'
+        'Transcription failed: Gemini API error 429 &lt;RESOURCE_EXHAUSTED&gt;|≈ $0.0008|'
+        '||Gemini is rate-limiting the API key, try again in a minute.|'
     )
     assert transcribe_buttons(result)[0] == {
         'text': 'Transcribe',

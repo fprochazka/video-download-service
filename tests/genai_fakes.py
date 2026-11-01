@@ -56,7 +56,8 @@ class FakeGenai:
         self.uploads = []
         self.deleted = []
         self.requests = []
-        # What generate_content returns, or raises when it is an exception
+        # What generate_content returns, or raises when it is an exception; a function of the request's contents
+        # answers each request on its own
         self.answer = response()
         self.upload_error = None
         self.processing_polls = 1
@@ -95,6 +96,7 @@ class FakeGenai:
 
     async def generate_content(self, *, model, contents, config):
         self.requests.append({'model': model, 'contents': contents, 'config': config})
-        if isinstance(self.answer, BaseException):
-            raise self.answer
-        return self.answer
+        answer = self.answer(contents) if callable(self.answer) else self.answer
+        if isinstance(answer, BaseException):
+            raise answer
+        return answer

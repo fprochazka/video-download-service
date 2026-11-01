@@ -21,7 +21,7 @@ A simple web service for downloading videos from various platforms using yt-dlp 
   - `downloading` - Video being downloaded
   - `completed` - At least one media file was downloaded
   - `failed` - Error occurred, or yt-dlp finished without a media file (details in `error`, `error_code`, `error_type`)
-- **Transcription** - A Transcribe button on each media file sends its audio to Google Gemini and adds a Markdown and a JSON transcript with timestamps and speaker labels to the job, see [Transcription](#transcription)
+- **Transcription** - A Transcribe button on each media file sends its audio to Google Gemini and adds a Markdown and a JSON transcript with timestamps and speaker labels to the job; recordings from 7 minutes are cut into chunks at chapters and pauses, see [Transcription](#transcription)
 - **MCP server** - Agents such as Claude Code download and transcribe videos through the `/mcp` endpoint, see [MCP server](#mcp-server)
 - **Cleanup of old media** - Media files over 5 MB are deleted 90 days after their job finished, the job page and its subtitles and details stay, see [Garbage collection](#garbage-collection)
 - **Restart safety** - Downloads that were running when the service stopped are marked `failed` with `error_code` `interrupted` on the next start
@@ -61,7 +61,7 @@ The frontend tests run the page script in Node.js against a stubbed DOM, pytest 
 
 The downloads directory defaults to `./downloads` and can be changed with the `DOWNLOADS_DIR` environment variable.
 
-Downloads run in an in-process worker, at most `DOWNLOAD_CONCURRENCY` (default `2`) at the same time; further jobs wait as `pending`. Transcriptions have their own queue, limited by `TRANSCRIPTION_CONCURRENCY` (default `2`). The queue lives in memory: jobs still queued or running when the service stops are marked `interrupted` on the next start.
+Downloads run in an in-process worker, at most `DOWNLOAD_CONCURRENCY` (default `2`) at the same time; further jobs wait as `pending`. Transcriptions have their own queue, limited by `TRANSCRIPTION_CONCURRENCY` (default `2`); the chunks of a long recording run `TRANSCRIPTION_CHUNK_CONCURRENCY` (default `4`) at a time within one transcription. The queue lives in memory: jobs still queued or running when the service stops are marked `interrupted` on the next start.
 
 ## Running the Application
 
@@ -298,12 +298,12 @@ Some options are owned by the service and always override `YTDLP_OPTS`: `ignoree
 
 ### Transcription
 
-The job page has a Transcribe button on each media file of a completed job. The service then extracts the audio with ffmpeg, sends it to the Gemini Developer API in one request, and stores the transcript next to the media as two files:
+The job page has a Transcribe button on each media file of a completed job. The service then extracts the audio with ffmpeg, sends it to the Gemini Developer API, and stores the transcript next to the media as two files:
 
-- `<media name>.transcript.md` - the title, then one paragraph per speaker turn, for example `**[01:05] Speaker 1:** text`
+- `<media name>.transcript.md` - the title, then one paragraph per speaker turn, for example `**[01:05] Speaker 1:** text`. A recording of 7 minutes or more also gets a heading per chapter, see [Long recordings](#long-recordings)
 - `<media name>.transcript.json` - the segments (`start` and `end` in whole seconds, `speaker`, `text`), the model, the token usage and the warnings. Gemini gives only the start of each segment, so a segment's `end` is the start of the next one
 
-The page lists both under Transcripts, with a Show button that displays the Markdown text. Transcribing a file again replaces both files. A 6-minute video takes about 10 seconds to transcribe.
+The page lists both under Transcripts, with a Show button that displays the Markdown text. Transcribing a file again replaces both files. A 6-minute video takes about 10 seconds to transcribe, a 90-minute one about 4 minutes.
 
 #### Setup
 
@@ -319,11 +319,44 @@ For local development, export the variables before you start uvicorn: `set -a; .
 
 `TRANSCRIPTION_MODEL` selects the model, the default is `gemini-3.5-flash-lite`. `app.env` is gitignored and excluded from the Docker image. The service never logs the key.
 
+#### Long recordings
+
+A recording shorter than 7 minutes goes to Gemini in one request. A longer one is cut into chunks of about 5 minutes, and each chunk is one request:
+
+1. Silero VAD (the `pysilero-vad` package) finds the speech in the audio. If it fails, ffmpeg's `silencedetect` (−35 dB for 0.4 s) finds the silences instead; it hears music as speech, so it finds fewer pauses. If that fails too, the cuts are hard cuts at fixed times.
+2. With chapters in the video's `info.json`, the chunks follow them. Consecutive chapters are merged while the chunk stays within 5 minutes, and a chunk shorter than 2 minutes takes the next chapter even when that makes it longer. A chapter longer than 7 minutes is split like a recording without chapters. Chapter times are typed by hand, so each cut moves to the longest pause of at least 0.3 s within 15 seconds of the chapter time, then within 45 seconds. Without a pause there, the cut is a hard cut at the chapter time.
+3. Without chapters, the recording is split into chunks of equal length of at most 5 minutes, each cut in the longest pause within a minute of its time, then within two minutes.
+4. Each cut lies in the middle of a pause, so no word is cut and the chunks do not overlap. ffmpeg writes each chunk to its own file that starts at 0, and the file goes inline in the request.
+
+`TRANSCRIPTION_CHUNK_MINUTES` changes the chunk length (default `5`); the maximum and minimum are 1.4 and 0.4 times it.
+
+The chunks run in parallel, `TRANSCRIPTION_CHUNK_CONCURRENCY` (default `4`) per transcription. Each request has the title, uploader, description and the titles of the chunk's chapters as context. It also has the text of the subtitles that start inside the chunk, without their times. The model writes timestamps from the start of the chunk, and the service adds the chunk's start. Each chunk numbers its speakers on its own, so `Speaker 1` of one chunk can be `Speaker 2` of the next. The Markdown transcript says so: it has a heading per chapter and a note where a new chunk starts, or a heading per chunk without chapters.
+
+Each answer is checked before it is used:
+
+- it ended with `STOP` and has `[HH:MM:SS]` lines
+- Gemini read 25 (or 32) audio tokens per second of the chunk, so it read the right audio
+- no timestamp lies past the end of the chunk, and none goes back more than 5 seconds. A few out-of-line timestamps (an hour digit in a chunk of minutes, a few lines minutes ahead) are moved between their neighbors, at most 10% of the lines
+- no line of four or more words occurs more than three times
+- no stretch of more than 30 seconds of speech, as Silero found it, lies between two consecutive lines
+
+A chunk that fails a check is sent again. If the second answer fails too, the chunk is split at its longest pause near the middle, and both halves are sent, twice each if needed. If a half fails both times, the transcription fails with `chunk_failed`. A request that hits a rate limit, a server error or a network failure is sent again after 10 and after 30 seconds; a rejected request fails the transcription at once.
+
+When all chunks have passed, the service compares them. A chunk is sent once more when it has less than half the text per minute of speech of the median chunk, or less than 85% of the words of its subtitles and 10 points less than the median chunk. The better of the two answers is kept, and a chunk that is still thin gets a `chunk_suspect` warning.
+
+`metadata.json` records the speech detection used (`speech_detection`: `vad`, `silencedetect` or null) and each chunk under `transcriptions.<media>.chunks`: its start and end, how it was cut (`start`, `chapter`, `pause` or `hard`), how far the cut moved from the chapter time (`snap_distance`) and the length of its pause. It also records every attempt with its finish reason, latency, model version, response ID, token usage, cost and the problems the checks found, and the measures of the result (`checks`). While a transcription runs, and after it failed, the chunks that passed keep their segments there, so a failed transcription keeps what it already paid for. The service does not reuse them yet. The `.transcript.json` has the same chunk records, the chapters, and the chunk index of each segment.
+
+On the 91-minute interview the chunking was tuned on (an English podcast with 33 chapters and two ad breaks), the transcript had 97.8% of the words of YouTube's speech recognition captions. The median chunk's timestamps were 1.5 seconds off the captions, and the worst one 14 seconds. Of the 660 caption words within 5 seconds of the 22 cuts, about 10 are missing. The 23 chunks took 30 requests, 4 minutes and $0.22. Three findings of that work shaped the rules above:
+
+- With chunks of 7 to 10 minutes, 12 of 22 answers stopped early, skipped passages or made up speech that is not in the audio. With chunks of 2 to 7 minutes and the next change, 5 of 30 answers failed the checks, and their retries passed.
+- Subtitles that run past the end of the chunk made Gemini skip to the speech they describe, or make up the speech that would lead to it. A chunk's prompt therefore has only the subtitles that start inside it, and it does not say that the audio is a part of a longer recording.
+- A second text-only request that matched the speakers of the chunks to each other labeled every chunk the same way, while in half of the chunks the labels were the other way round. The transcript does not try to match them.
+
 #### Cost
 
-On `gemini-3.5-flash-lite` a 6-minute video of dense dialogue took 11.3k input tokens (8.9k of them audio, 25 tokens per second) and 4.0k output tokens. At the list price of $0.30 per million input and $2.50 per million output tokens that is $0.013, about $0.13 per hour of speech. The output is most of the bill, so a recording with less speech costs less.
+On `gemini-3.5-flash-lite` a 6-minute video of dense dialogue took 11.3k input tokens (8.9k of them audio, 25 tokens per second) and 4.0k output tokens. At the list price of $0.30 per million input and $2.50 per million output tokens that is $0.013, about $0.13 per hour of speech. The output is most of the bill, so a recording with less speech costs less. A long recording costs about $0.15 per hour: each chunk repeats the description in its prompt, and a chunk sent again is paid again.
 
-The job page shows the estimated cost next to each transcript, for example `≈ $0.013`, and its tooltip shows the token counts and the prices used. Gemini reports only token counts, never an amount of money. The service multiplies the counts by a table of list prices: the standard paid tier from https://ai.google.dev/gemini-api/docs/pricing, as of 2026-10-30. Audio input and text input are priced apart where a model prices them apart, thinking tokens are priced as output, and the long-context tier of `gemini-3.1-pro-preview` applies above 200k prompt tokens. The estimate does not know about the free tier, discounts or later price changes. A model without a known price, such as `gemini-3.5-flash`, which the pricing page does not list, shows its token count only.
+The job page shows the estimated cost next to each transcript, for example `≈ $0.013`, and its tooltip shows the token counts and the prices used. The cost of a long recording is the sum over all its requests, the retries included, and a failed long recording shows what it cost too. Gemini reports only token counts, never an amount of money. The service multiplies the counts by a table of list prices: the standard paid tier from https://ai.google.dev/gemini-api/docs/pricing, as of 2026-10-30. Audio input and text input are priced apart where a model prices them apart, thinking tokens are priced as output, and the long-context tier of `gemini-3.1-pro-preview` applies above 200k prompt tokens. The estimate does not know about the free tier, discounts or later price changes. A model without a known price, such as `gemini-3.5-flash`, which the pricing page does not list, shows its token count only.
 
 To change a price or add a model, set `TRANSCRIPTION_PRICES` in `app.env` to a JSON object of prices in USD per million tokens, in single quotes so both Compose and a shell read it whole; it replaces the built-in prices of the models it names:
 
@@ -341,28 +374,31 @@ The default comes from a comparison on that video, scored against its manual sub
 
 #### What the service sends to Google
 
-- the audio of the media file, mono 16 kHz Opus, uploaded to the Files API and deleted right after the request
+- the audio of the media file, mono 16 kHz Opus. A recording under 7 minutes is uploaded to the Files API and deleted right after the request; the chunks of a longer one go inline in their requests
 - the title, uploader, channel, description and chapters of the video
 - the text of one subtitle track of the job (a manual track first, else the speech recognition track), as a reference that may be wrong. Its timestamps are left out: subtitles timed for another edit of the video made Gemini copy their times
 
 The video's own text goes into the prompt in tagged blocks with `<`, `>` and `&` escaped, and the instructions tell the model to treat it as data. A description that contains instructions therefore cannot end its block, but a model can still be influenced by text it reads.
 
-#### Limits of the current version
+#### Limits
 
-- The whole recording goes in one request. Long recordings get worse before they hit a limit; only a 6-minute video was tested.
-- The output limit of a request (65,536 tokens) is reached at about 50 to 100 minutes of speech. The transcription then fails with `output_truncated`. Cutting the audio into parts is not supported yet.
 - Timestamps come from the model and can drift; they are approximate.
-- Speaker labels are `Speaker 1`, `Speaker 2` unless the audio or the description names the speaker.
+- Speaker labels are `Speaker 1`, `Speaker 2` unless the audio or the description names the speaker. In a long recording they start again in each chunk.
+- The checks of a chunk catch an answer that skipped a passage of speech, but not one that drops the last few seconds of a chunk or a single sentence.
+- A recording without subtitles has no reference to compare the chunks with, only their text per minute of speech.
+- Chunking was tested on one English recording. Czech and other languages are untested; the check of text per minute of speech compares chunks with each other, so it does not depend on the language.
+- An answer that loops ends at the output limit the service sets, 1,300 tokens per minute of audio. A recording under 7 minutes then fails with `output_truncated`; a chunk of a longer one is sent again.
 
 The service checks the result and stores warnings in `warnings`; they do not fail the transcription:
 
 - `ends_early` - the last segment ends long before the end of the media, so speech may be missing or the timestamps drifted
 - `beyond_duration` - timestamps past the end of the media
 - `timestamps_out_of_order` - segments that end before they start, or out of order
-- `repeated_text` - several lines appear twice, Gemini likely repeated a part of the recording
+- `repeated_text` - several lines appear twice, Gemini likely repeated a part of the recording. Not checked on long recordings, where an interview's trailer repeats its lines; their chunks are checked for repetition one by one
 - `low_coverage` - the transcript has less than 60% of the text of the subtitles
 - `no_speech` - the transcript is empty
 - `unparsed_lines` - lines of the answer that were not `[HH:MM:SS]` transcript lines, left out
+- `chunk_suspect` - a chunk of a long recording has much less text than the others even after it was sent again, see [Long recordings](#long-recordings)
 
 A failed transcription has an `error` and one of these `error_code` values:
 
@@ -372,6 +408,7 @@ A failed transcription has an `error` and one of these `error_code` values:
 - `output_truncated` - the answer hit the output token limit; a cut-off transcript is never stored
 - `blocked` - Gemini's safety or recitation filter stopped the answer
 - `invalid_response` - the answer had no `[HH:MM:SS]` transcript line
+- `chunk_failed` - a chunk of a long recording had no answer that passed the checks, even after it was split; the error names the chunk and its time range
 - `audio_extraction_failed` - ffmpeg could not read the audio
 - `media_missing` - the media file was deleted before the transcription started
 - `interrupted` - the service restarted while the transcription was queued or running
@@ -450,8 +487,9 @@ video-download/
 │   ├── status.py        # The job status the API and the MCP tools return
 │   ├── jobs.py          # Job creation, the download task, the startup sweep
 │   ├── worker.py        # In-process job queues with a concurrency limit per lane
-│   ├── transcription.py # Transcription pipeline: prompt, answer parsing, checks, transcript files
-│   ├── gemini.py        # Gemini Developer API calls (Files API upload, generate_content)
+│   ├── transcription.py # Transcription pipeline: prompt, answer parsing, checks, chunks, transcript files
+│   ├── chunking.py      # Where a long recording is cut, and the measures that validate a chunk
+│   ├── gemini.py        # Gemini Developer API calls (Files API upload or inline audio, generate_content)
 │   ├── pricing.py       # List prices and the estimated cost of a transcription
 │   ├── audio.py         # ffmpeg audio extraction and ffprobe duration
 │   ├── vad.py           # Speech and pauses of a recording, from Silero VAD or ffmpeg silencedetect

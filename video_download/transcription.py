@@ -1,9 +1,9 @@
 """Transcription of a job's media file with Gemini: the pipeline, its state in metadata, and the transcript files.
 
-The pipeline: ffmpeg extracts the audio, the audio is split into chunks, each chunk is one provider request with the
-video's details and subtitles as context, the validated segments are checked against the media's duration and the
-subtitles, and the transcript is written next to the media. v1 sends the whole audio as one chunk; plan_chunks is where
-cutting at pauses slots in, and every segment's time is already shifted by its chunk's offset.
+The pipeline: ffmpeg extracts the audio, a recording under 7 minutes goes to Gemini in one request with the video's
+details and subtitles as context, the segments are checked against the media's duration and the subtitles, and the
+transcript is written next to the media. A longer recording is cut into chunks at chapters and pauses (see chunking),
+the chunks are sent in parallel, each one validated and retried on its own, and their segments joined.
 """
 
 import asyncio
@@ -11,14 +11,17 @@ import html
 import json
 import logging
 import math
+import os
 import re
+import statistics
+import time
 import uuid
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Protocol
 
-from video_download import audio, config, gemini, pricing, storage
+from video_download import audio, chunking, config, gemini, pricing, storage, vad
 from video_download.gemini import ProviderError, ProviderResponse, TranscriptionRequest, Usage
 from video_download.storage import (
     INFO_FILENAME,
@@ -69,10 +72,12 @@ ERROR_MESSAGES = {
 
 
 class TranscriptionFailed(Exception):
-    def __init__(self, code: str, message: str):
+    def __init__(self, code: str, message: str, **fields):
         super().__init__(message)
         self.code = code
         self.message = message
+        # More of the transcription's state to store with the failure, the usage and cost of a chunked one
+        self.fields = fields
 
 
 class Provider(Protocol):
@@ -321,7 +326,11 @@ def repeated_lines(texts) -> int:
     return sum(1 for count in counts.values() if count > 1)
 
 
-def sanity_warnings(segments: list[dict], duration: float, subtitles: list[tuple[float, str]]) -> list[dict]:
+def sanity_warnings(
+    segments: list[dict], duration: float, subtitles: list[tuple[float, str]], repeats: bool = True
+) -> list[dict]:
+    """repeats: whether to warn about repeated lines; a long interview repeats lines in its trailer, and the chunks of a
+    long recording are checked for repetition one by one instead"""
     warnings = []
 
     def warn(code: str, message: str):
@@ -343,7 +352,7 @@ def sanity_warnings(segments: list[dict], duration: float, subtitles: list[tuple
         warn('beyond_duration', f'Timestamps go up to {format_timestamp(last_end)}, past the end of the media.')
     if any(end < start for start, end in zip(starts, ends, strict=True)) or starts != sorted(starts):
         warn('timestamps_out_of_order', 'Some segments end before they start or are out of order.')
-    repeated = repeated_lines(s['text'] for s in segments)
+    repeated = repeated_lines(s['text'] for s in segments) if repeats else 0
     if repeated >= 2:
         warn(
             'repeated_text',
@@ -369,28 +378,53 @@ def transcript_names(media_name: str) -> tuple[str, str]:
     return stem + TRANSCRIPT_MD_SUFFIX, stem + TRANSCRIPT_JSON_SUFFIX
 
 
+# A chapter heading goes before the first segment that starts at most this long before the chapter's time
+CHAPTER_HEADING_SLACK_SECONDS = 2
+
+
 def render_markdown(title: str | None, media_name: str, transcript: dict, duration: float) -> str:
+    """A transcript in chunks gets a heading per chapter, or per chunk without chapters, and a note where the speaker
+    numbers start again"""
     long_media = duration >= 3600
     heading = ' '.join((title or media_name).split())
-    lines = [f'# {heading}', '', f'Transcribed from {media_name} by {transcript["model"]}. Timestamps are approximate.']
+    intro = f'Transcribed from {media_name} by {transcript["model"]}. Timestamps are approximate.'
+    chunks = transcript.get('chunks') or []
+    chapters = sorted((c['start'], ' '.join(c['title'].split())) for c in transcript.get('chapters') or [])
+    if len(chunks) > 1:
+        intro += f' The recording was transcribed in {len(chunks)} parts, the speaker numbers start again in each part.'
+    lines = [f'# {heading}', '', intro]
     paragraph_speaker = None
     paragraph_start = 0
     paragraph: list[str] = []
+    chunk = None
 
     def flush():
         if paragraph:
             stamp = short_timestamp(paragraph_start, long_media)
             lines.extend(['', f'**[{stamp}] {paragraph_speaker}:** ' + ' '.join(paragraph)])
+        paragraph.clear()
 
     for segment in transcript['segments']:
         text = ' '.join(segment['text'].split())
         if not text:
             continue
         start = segment['start']
+        headings = []
+        while chapters and chapters[0][0] - CHAPTER_HEADING_SLACK_SECONDS <= start:
+            headings.append(f'## {chapters.pop(0)[1]}')
+        if len(chunks) > 1 and segment.get('chunk') != chunk:
+            chunk = segment.get('chunk')
+            part = f'Part {(chunk or 0) + 1} of {len(chunks)}'
+            if not transcript.get('chapters'):
+                headings.append(f'## {part}')
+            elif chunk:
+                headings.append(f'*{part}, the speaker numbers start again.*')
         speaker = ' '.join(segment['speaker'].split()) or 'Speaker'
-        if speaker != paragraph_speaker or start - paragraph_start >= PARAGRAPH_SECONDS:
+        if headings or speaker != paragraph_speaker or start - paragraph_start >= PARAGRAPH_SECONDS:
             flush()
-            paragraph_speaker, paragraph_start, paragraph = speaker, start, []
+            for line in headings:
+                lines.extend(['', line])
+            paragraph_speaker, paragraph_start = speaker, start
         paragraph.append(text)
     flush()
     return '\n'.join(lines) + '\n'
@@ -516,30 +550,23 @@ def pricing_date(value: str | None):
         return datetime.now(UTC).date()
 
 
-def mark_failed(download_dir: Path, download_id: str, media_name: str, code: str, message: str):
+def mark_failed(download_dir: Path, download_id: str, media_name: str, code: str, message: str, **fields):
     logger.error('Transcription %s/%s failed: error_code=%s: %s', download_id, media_name, code, message)
     try:
         set_transcription(
-            download_dir, media_name, status='failed', error=message, error_code=code, completed_at=storage.now_iso()
+            download_dir,
+            media_name,
+            status='failed',
+            error=message,
+            error_code=code,
+            completed_at=storage.now_iso(),
+            **fields,
         )
     except Exception:
         logger.exception('Could not store the failure of transcription %s/%s', download_id, media_name)
 
 
 # --- The pipeline
-
-
-@dataclass
-class AudioChunk:
-    path: Path
-    # Where the chunk starts in the media, added to every timestamp of its segments
-    offset: float
-    duration: float
-
-
-def plan_chunks(audio_path: Path, duration: float) -> list[AudioChunk]:
-    """v1: the whole audio in one request. Cutting at pauses into chunks of about 10 minutes goes here."""
-    return [AudioChunk(audio_path, 0, duration)]
 
 
 async def media_duration(media_path: Path, metadata: dict) -> float:
@@ -551,29 +578,34 @@ async def media_duration(media_path: Path, metadata: dict) -> float:
     return duration
 
 
-async def transcribe_chunk(provider: Provider, chunk: AudioChunk, context: Context, display_name: str):
+async def transcribe_whole(provider: Provider, audio_path: Path, duration: float, context: Context, display_name: str):
+    """A recording under 7 minutes: one request with the whole audio"""
     request = TranscriptionRequest(
-        audio=chunk.path,
+        audio=audio_path,
         mime_type=audio.AUDIO_MIME_TYPE,
         system_instruction=SYSTEM_INSTRUCTION,
-        prompt=build_prompt(context, chunk.duration),
-        max_output_tokens=max_output_tokens(chunk.duration),
+        prompt=build_prompt(context, duration),
+        max_output_tokens=max_output_tokens(duration),
         display_name=display_name,
     )
     try:
         response = await provider.transcribe(request)
     except ProviderError as e:
         raise TranscriptionFailed(e.code, e.message) from e
+    log_answer(display_name, response)
+    check_finish(response)
+    return parse_transcript(response.text), response.usage
+
+
+def log_answer(label: str, response: ProviderResponse):
     logger.info(
         'Transcription %s: Gemini answered: finish_reason=%s prompt_tokens=%d output_tokens=%d thinking_tokens=%d',
-        display_name,
+        label,
         response.finish_reason,
         response.usage.prompt_tokens,
         response.usage.output_tokens,
         response.usage.thinking_tokens,
     )
-    check_finish(response)
-    return parse_transcript(response.text), response.usage
 
 
 async def run_pipeline(download_id: str, download_dir: Path, media_name: str, metadata: dict, provider: Provider):
@@ -584,27 +616,29 @@ async def run_pipeline(download_id: str, download_dir: Path, media_name: str, me
     context = build_context(download_dir, metadata)
 
     audio_path = download_dir / f'.{Path(media_name).stem}.transcribe-{uuid.uuid4().hex[:8]}.{audio.AUDIO_EXTENSION}'
+    chunked = None
     try:
         try:
             await audio.extract_audio(media_path, audio_path)
         except audio.AudioExtractionError as e:
             raise TranscriptionFailed('audio_extraction_failed', str(e)) from e
 
-        segments: list[dict] = []
-        usage = Usage()
-        # Each request is priced on its own, the long-context tier of a model applies per request
-        request_usages: list[dict] = []
-        unparsed = 0
-        for chunk in plan_chunks(audio_path, duration):
-            transcript, chunk_usage = await transcribe_chunk(provider, chunk, context, download_id)
-            usage = usage.add(chunk_usage)
-            request_usages.append(asdict(chunk_usage))
-            unparsed += transcript.unparsed
-            segments += [shift(segment, chunk.offset) for segment in transcript.segments]
+        if duration < chunking.CHUNKED_FROM_SECONDS:
+            transcript, usage = await transcribe_whole(provider, audio_path, duration, context, download_id)
+            segments, unparsed = transcript.segments, transcript.unparsed
+            # Each request is priced on its own, the long-context tier of a model applies per request
+            request_usages = [asdict(usage)]
+            warnings = []
+        else:
+            chunked = ChunkedRun(provider, download_id, download_dir, media_name, audio_path, duration, context)
+            await chunked.run()
+            segments, unparsed, request_usages = chunked.segments(), chunked.unparsed(), chunked.request_usages()
+            usage = Usage(**{key: sum(u[key] for u in request_usages) for key in asdict(Usage())})
+            warnings = chunked.warnings
     finally:
         audio_path.unlink(missing_ok=True)
 
-    warnings = sanity_warnings(segments, duration, context.subtitles)
+    warnings = sanity_warnings(segments, duration, context.subtitles, repeats=chunked is None) + warnings
     if unparsed:
         warnings.append(
             {
@@ -625,11 +659,475 @@ async def run_pipeline(download_id: str, download_dir: Path, media_name: str, me
         'warnings': warnings,
         'created_at': storage.now_iso(),
     }
+    if chunked:
+        transcript |= {
+            'speech_detection': chunked.speech_source,
+            'chapters': [{'start': start, 'title': title} for start, title in chunked.plan.chapters],
+            'chunks': chunked.chunk_summaries(),
+        }
     md_name, json_name = transcript_names(media_name)
     write_atomic(download_dir / json_name, lambda f: json.dump(transcript, f, indent=2, ensure_ascii=False))
     markdown = render_markdown(metadata.get('title'), media_name, transcript, duration)
     write_atomic(download_dir / md_name, lambda f: f.write(markdown))
     return [md_name, json_name], warnings, usage_fields, cost
+
+
+# --- Long recordings: chunks transcribed in parallel, each validated and retried on its own
+
+# Per job; TRANSCRIPTION_CONCURRENCY jobs can run at once
+DEFAULT_CHUNK_CONCURRENCY = 4
+# Requests that hit a rate limit, a server error or a network failure are sent again after these delays
+TRANSIENT_RETRY_DELAYS = (10, 30)
+# A chunk whose answer fails a check is sent again; when the second answer fails too, the chunk is split in two
+CHUNK_ATTEMPTS = 2
+MIN_SPLIT_SECONDS = 120
+
+# Gemini 3 bills 25 tokens per second of audio, Gemini 2 32; an audio count off both means the wrong audio was read
+AUDIO_TOKEN_RATES = (25, 32)
+AUDIO_TOKENS_TOLERANCE = 0.03
+# Timestamps may run this far past the end of a chunk, or back from one line to the next
+TIME_SLACK_SECONDS = 10
+MAX_BACKWARD_SECONDS = 5
+# More speech than this between two consecutive lines is a passage the transcript skipped; one line is at most about
+# 20 seconds of speech
+MAX_BLIND_SPEECH_SECONDS = 30
+MAX_LINE_REPEATS = 3
+# A chunk that has less text per minute of speech than half the median chunk, or misses more subtitle words than the
+# other chunks, is sent once more and the better answer kept; Gemini 3.5 Flash-Lite drops passages at random
+MIN_DENSITY_RATIO = 0.5
+MIN_RECALL = 0.85
+RECALL_MARGIN = 0.10
+MIN_REFERENCE_WORDS = 100
+
+
+def chunk_concurrency() -> int:
+    return max(1, config.env_int('TRANSCRIPTION_CHUNK_CONCURRENCY', DEFAULT_CHUNK_CONCURRENCY))
+
+
+def chunk_lengths() -> chunking.Lengths:
+    minutes = float(os.environ.get('TRANSCRIPTION_CHUNK_MINUTES') or chunking.DEFAULT_TARGET_SECONDS / 60)
+    return chunking.Lengths(max(1.0, minutes) * 60)
+
+
+def build_chunk_prompt(context: Context, chunk: chunking.ChunkPlan, subtitles: list[str]) -> str:
+    """The prompt of one chunk: its own length, the titles of its chapters, and the subtitles of its time range.
+
+    It does not say that the audio is a part of a longer recording, nor repeat the task after the subtitles: answers to
+    such a prompt more often stopped early or made up a passage.
+    """
+    length = math.ceil(chunk.duration)
+    parts = [f'Transcribe the attached audio. It is {format_timestamp(length)} ({length} seconds) long.']
+    parts.append(block('video_title', context.title))
+    parts.append(block('video_uploader', context.uploader))
+    if context.channel != context.uploader:
+        parts.append(block('video_channel', context.channel))
+    description = context.description or ''
+    if len(description) > MAX_DESCRIPTION_CHARS:
+        description = description[:MAX_DESCRIPTION_CHARS] + ' [cut]'
+    parts.append(block('video_description', description))
+    # The chapters of this part only, without their times, which count from the start of the whole recording
+    parts.append(block('video_chapters', '\n'.join(chunk.chapters)))
+    parts.append(block('reference_subtitles', '\n'.join(subtitles)))
+    return '\n\n'.join(part for part in parts if part)
+
+
+def subtitles_between(cues: list[tuple[float, str]], start: float, end: float) -> list[str]:
+    """The subtitles that start inside [start, end); subtitles from past the end of the audio made Gemini skip to them
+    and stop, or make up the speech that would lead to them"""
+    return [text for time, text in cues if start <= time < end]
+
+
+def problem(code: str, message: str) -> dict:
+    return {'code': code, 'message': message}
+
+
+def answer_problems(
+    response: ProviderResponse, transcript: ChunkTranscript | None, duration: float, speech: list | None
+) -> list[dict]:
+    """What is wrong with the answer for a chunk of this duration; speech is the chunk's speech regions from Silero,
+    from 0, or None when they are not known well enough to judge by"""
+    problems = []
+    usage = response.usage
+    if usage.prompt_tokens <= 0:
+        problems.append(problem('no_prompt_tokens', 'Gemini reported no prompt tokens, it read nothing.'))
+    if usage.prompt_audio_tokens:
+        rates = [usage.prompt_audio_tokens / duration / rate for rate in AUDIO_TOKEN_RATES]
+        if not any(abs(ratio - 1) <= AUDIO_TOKENS_TOLERANCE for ratio in rates):
+            problems.append(
+                problem(
+                    'audio_tokens',
+                    f'Gemini read {usage.prompt_audio_tokens} audio tokens for {duration:.0f} s of audio.',
+                )
+            )
+    if transcript is None:
+        return problems
+    starts = [s['start'] for s in transcript.segments]
+    if starts and max(starts) > duration + TIME_SLACK_SECONDS:
+        problems.append(problem('beyond_chunk', f'A timestamp is at {max(starts)} s of a {duration:.0f} s chunk.'))
+    backward = max((a - b for a, b in zip(starts, starts[1:], strict=False)), default=0)
+    if backward > MAX_BACKWARD_SECONDS:
+        problems.append(problem('out_of_order', f'The timestamps go back by {backward} s.'))
+    repeats = chunking.most_repeated_line(s['text'] for s in transcript.segments)
+    if repeats > MAX_LINE_REPEATS:
+        problems.append(problem('repeated_text', f'A line is repeated {repeats} times.'))
+    if transcript.unparsed > max(5, len(starts) // 10):
+        problems.append(problem('unparsed_lines', f'{transcript.unparsed} lines were not transcript lines.'))
+    if speech is not None:
+        blind = chunking.largest_blind_speech(starts, speech, 0, duration)
+        if blind > MAX_BLIND_SPEECH_SECONDS:
+            problems.append(problem('blind_gap', f'{blind:.0f} s of speech have no transcript line.'))
+    return problems
+
+
+def repair_timestamps(transcript: ChunkTranscript, duration: float) -> tuple[ChunkTranscript, int] | None:
+    """The transcript with its few out-of-line timestamps moved between their neighbours, see chunking.repair_times;
+    None when there are too many, the checks then reject the answer"""
+    repaired = chunking.repair_times([s['start'] for s in transcript.segments], duration)
+    if repaired is None:
+        return None
+    starts, moved = repaired
+    segments = [s | {'start': start, 'end': start} for s, start in zip(transcript.segments, starts, strict=True)]
+    for segment, following in zip(segments, segments[1:], strict=False):
+        segment['end'] = max(segment['start'], following['start'])
+    return ChunkTranscript(segments, transcript.unparsed), moved
+
+
+@dataclass
+class Piece:
+    """One request's worth of a chunk: the whole chunk, or a half of it after its answers failed"""
+
+    start: float
+    end: float
+    segments: list[dict] = field(default_factory=list)
+    unparsed: int = 0
+
+
+class ChunkedRun:
+    def __init__(self, provider, download_id, download_dir, media_name, audio_path, duration, context: Context):
+        self.provider = provider
+        self.download_id = download_id
+        self.download_dir = download_dir
+        self.media_name = media_name
+        self.audio_path = audio_path
+        self.duration = duration
+        self.context = context
+        self.speech_source = None
+        self.speech: list | None = None
+        self.plan: chunking.Plan | None = None
+        # Per chunk: the state stored in metadata, and the pieces its transcript is made of
+        self.states: list[dict] = []
+        self.pieces: list[list[Piece] | None] = []
+        self.warnings: list[dict] = []
+        self.semaphore = asyncio.Semaphore(chunk_concurrency())
+
+    async def run(self):
+        detected = await vad.detect_speech(self.audio_path, self.duration, logger)
+        if detected:
+            self.speech_source, self.speech = detected.source, detected.regions
+        self.plan = chunking.plan_chunks(self.duration, self.speech, self.context.chapters, chunk_lengths())
+        self.states = [self.initial_state(chunk) for chunk in self.plan.chunks]
+        self.pieces = [None] * len(self.plan.chunks)
+        logger.info(
+            'Transcription %s/%s: %d chunks, cut at pauses from %s',
+            self.download_id,
+            self.media_name,
+            len(self.plan.chunks),
+            self.speech_source or 'nothing, hard cuts',
+        )
+        self.store()
+        results = await asyncio.gather(*(self.transcribe(chunk) for chunk in self.plan.chunks), return_exceptions=True)
+        for result in results:
+            if isinstance(result, TranscriptionFailed):
+                raise self.failure(result.code, result.message)
+            if isinstance(result, BaseException):
+                raise result
+        failed = [chunk for chunk in self.plan.chunks if self.pieces[chunk.index] is None]
+        if failed:
+            raise self.failure('chunk_failed', self.failure_message(failed))
+        await self.recheck_outliers()
+        # The segments are in the transcript now
+        self.store(with_segments=False)
+
+    def initial_state(self, chunk: chunking.ChunkPlan) -> dict:
+        return {
+            'index': chunk.index,
+            'start': chunk.start,
+            'end': chunk.end,
+            'cut': chunk.cut.method,
+            'snap_distance': chunk.cut.snap_distance,
+            'pause': chunk.cut.pause,
+            'chapters': chunk.chapters,
+            'status': 'pending',
+            'attempts': [],
+            'checks': None,
+            'error': None,
+        }
+
+    def store(self, with_segments: bool = True):
+        """Record the chunks in metadata, with the segments of the finished ones, so a retry could skip them"""
+        set_transcription(
+            self.download_dir,
+            self.media_name,
+            speech_detection=self.speech_source,
+            chunks=[
+                state | {'segments': self.chunk_segments(state['index'])}
+                if with_segments and state['status'] == 'completed'
+                else state
+                for state in self.states
+            ],
+        )
+
+    def speech_within(self, start: float, end: float) -> list | None:
+        """The speech regions of [start, end) from 0; silencedetect calls music speech, so only Silero's count"""
+        if self.speech_source != 'vad':
+            return None
+        return [(max(s, start) - start, min(e, end) - start) for s, e in self.speech if e > start and s < end]
+
+    async def transcribe(self, chunk: chunking.ChunkPlan):
+        state = self.states[chunk.index]
+        async with self.semaphore:
+            state['status'] = 'running'
+            piece = await self.transcribe_piece(chunk, chunk.start, chunk.end, CHUNK_ATTEMPTS)
+            if piece is not None:
+                pieces = [piece]
+            elif chunk.duration >= MIN_SPLIT_SECONDS:
+                pieces = await self.transcribe_halves(chunk)
+            else:
+                pieces = None
+        if pieces is None:
+            state['status'] = 'failed'
+            last = state['attempts'][-1] if state['attempts'] else {}
+            state['error'] = (last.get('problems') or [{}])[0].get('message') or last.get('error') or 'unknown'
+        else:
+            self.pieces[chunk.index] = pieces
+            state['status'] = 'completed'
+            state['checks'] = self.checks(chunk)
+        self.store()
+
+    async def transcribe_halves(self, chunk: chunking.ChunkPlan) -> list[Piece] | None:
+        middle = chunk.start + chunk.duration / 2
+        window = (chunk.start + chunk.duration / 4, chunk.end - chunk.duration / 4)
+        cut = chunking.find_cut(chunking.pauses_between(self.speech, self.duration), middle, [window], chunking.PAUSE)
+        logger.warning(
+            'Transcription %s/%s: chunk %d failed twice, splitting it at %.1f s',
+            self.download_id,
+            self.media_name,
+            chunk.index,
+            cut.time,
+        )
+        self.states[chunk.index]['split_at'] = cut.time
+        halves = []
+        for start, end in ((chunk.start, cut.time), (cut.time, chunk.end)):
+            piece = await self.transcribe_piece(chunk, start, end, CHUNK_ATTEMPTS)
+            if piece is None:
+                return None
+            halves.append(piece)
+        return halves
+
+    async def transcribe_piece(self, chunk: chunking.ChunkPlan, start: float, end: float, attempts: int):
+        """The validated transcript of [start, end) of the chunk, None when no attempt passed the checks"""
+        state = self.states[chunk.index]
+        path = self.audio_path.with_name(
+            f'{self.audio_path.stem}-{chunk.index:03d}-{round(start)}{self.audio_path.suffix}'
+        )
+        try:
+            await audio.cut_audio(self.audio_path, path, start, end)
+            part = chunk if (start, end) == (chunk.start, chunk.end) else replace(chunk, start=start, end=end)
+            subtitles = subtitles_between(self.context.subtitles, start, end)
+            prompt = build_chunk_prompt(self.context, part, subtitles)
+            for _ in range(attempts):
+                piece, record = await self.attempt(path, part, prompt)
+                state['attempts'].append(record | {'start': start, 'end': end})
+                if piece is not None:
+                    return piece
+                if record.get('fatal'):
+                    raise TranscriptionFailed(record['error_code'], record['error'])
+            return None
+        except audio.AudioExtractionError as e:
+            raise TranscriptionFailed('audio_extraction_failed', str(e)) from e
+        finally:
+            path.unlink(missing_ok=True)
+
+    async def attempt(self, path: Path, part: chunking.ChunkPlan, prompt: str) -> tuple[Piece | None, dict]:
+        request = TranscriptionRequest(
+            audio=path,
+            mime_type=audio.AUDIO_MIME_TYPE,
+            system_instruction=SYSTEM_INSTRUCTION,
+            prompt=prompt,
+            max_output_tokens=max_output_tokens(part.duration),
+            display_name=f'{self.download_id}-{part.index}',
+            inline=True,
+        )
+        label = f'{self.download_id} chunk {part.index} [{part.start:.0f}-{part.end:.0f}]'
+        started = time.monotonic()
+        try:
+            response = await self.send(request, label)
+        except ProviderError as e:
+            # A bad request is the same the next time; the transient errors were already retried
+            record = {'error': e.message, 'error_code': e.code, 'fatal': not e.transient}
+            return None, record | {'latency_seconds': round(time.monotonic() - started, 1)}
+        log_answer(label, response)
+        record = {
+            'latency_seconds': round(time.monotonic() - started, 1),
+            'finish_reason': response.finish_reason,
+            'model_version': response.model_version,
+            'response_id': response.response_id,
+            'usage': asdict(response.usage),
+            'cost': pricing.estimate(self.provider.model, [asdict(response.usage)], datetime.now(UTC).date()),
+        }
+        transcript = None
+        problems = []
+        try:
+            check_finish(response)
+            transcript = parse_transcript(response.text)
+        except TranscriptionFailed as e:
+            problems.append(problem(e.code, e.message))
+        if transcript is not None and (repaired := repair_timestamps(transcript, part.duration)):
+            transcript, record['repaired_timestamps'] = repaired
+        problems += answer_problems(response, transcript, part.duration, self.speech_within(part.start, part.end))
+        record['problems'] = problems
+        if problems:
+            logger.warning('Transcription %s failed its checks: %s', label, '; '.join(p['message'] for p in problems))
+            return None, record
+        segments = [shift(segment, part.start) | {'chunk': part.index} for segment in transcript.segments]
+        return Piece(part.start, part.end, segments, transcript.unparsed), record
+
+    async def send(self, request: TranscriptionRequest, label: str) -> ProviderResponse:
+        for delay in (*TRANSIENT_RETRY_DELAYS, None):
+            try:
+                return await self.provider.transcribe(request)
+            except ProviderError as e:
+                if not e.transient or delay is None:
+                    raise
+                logger.warning('Transcription %s: %s, sending it again in %d s', label, e.message, delay)
+                await asyncio.sleep(delay)
+        raise AssertionError('unreachable')
+
+    def chunk_segments(self, index: int) -> list[dict]:
+        return [segment for piece in self.pieces[index] or [] for segment in piece.segments]
+
+    def checks(self, chunk: chunking.ChunkPlan) -> dict:
+        """Measures of the chunk's transcript that are only telling next to the other chunks'"""
+        segments = self.chunk_segments(chunk.index)
+        checks = {'segments': len(segments)}
+        if self.speech_source == 'vad':
+            speech = chunking.speech_seconds(self.speech, chunk.start, chunk.end)
+            chars = visible_chars(s['text'] for s in segments)
+            checks |= {
+                'speech_seconds': round(speech, 1),
+                'chars_per_speech_minute': round(chars / (speech / 60)) if speech >= 60 else None,
+            }
+        reference = chunking.words(' '.join(subtitles_between(self.context.subtitles, chunk.start, chunk.end)))
+        if len(reference) >= MIN_REFERENCE_WORDS:
+            transcript_words = chunking.words(' '.join(s['text'] for s in segments))
+            checks['subtitle_recall'] = round(chunking.recall(reference, transcript_words), 3)
+        return checks
+
+    def outliers(self) -> dict[int, str]:
+        """Chunks whose transcript is thin next to the others: index -> why"""
+        found = {}
+        states = [s for s in self.states if s['checks']]
+        densities = [
+            s['checks']['chars_per_speech_minute'] for s in states if s['checks'].get('chars_per_speech_minute')
+        ]
+        recalls = [s['checks']['subtitle_recall'] for s in states if s['checks'].get('subtitle_recall') is not None]
+        median_density = statistics.median(densities) if len(densities) >= 3 else None
+        median_recall = statistics.median(recalls) if len(recalls) >= 3 else None
+        for state in states:
+            checks = state['checks']
+            density, recall = checks.get('chars_per_speech_minute'), checks.get('subtitle_recall')
+            if median_density and density and density < MIN_DENSITY_RATIO * median_density:
+                found[state['index']] = (
+                    f'{density} characters per minute of speech, the median chunk has {median_density}'
+                )
+            elif (
+                median_recall and recall is not None and recall < MIN_RECALL and recall < median_recall - RECALL_MARGIN
+            ):
+                found[state['index']] = f'{recall:.0%} of the subtitle words, the median chunk has {median_recall:.0%}'
+        return found
+
+    def score(self, index: int) -> tuple:
+        checks = self.states[index]['checks'] or {}
+        return (checks.get('subtitle_recall') or 0, checks.get('chars_per_speech_minute') or 0)
+
+    async def recheck_outliers(self):
+        """Send each thin chunk once more and keep the better transcript; a chunk still thin gets a warning"""
+        outliers = self.outliers()
+        if not outliers:
+            return
+
+        async def again(chunk: chunking.ChunkPlan):
+            state = self.states[chunk.index]
+            logger.warning(
+                'Transcription %s/%s: chunk %d is thin (%s), sending it again',
+                self.download_id,
+                self.media_name,
+                chunk.index,
+                outliers[chunk.index],
+            )
+            try:
+                async with self.semaphore:
+                    piece = await self.transcribe_piece(chunk, chunk.start, chunk.end, 1)
+            except TranscriptionFailed as e:
+                # The chunk already has a transcript that passed the checks, it stays
+                logger.warning(
+                    'Transcription %s/%s: chunk %d again: %s', self.download_id, self.media_name, chunk.index, e
+                )
+                return
+            if piece is None:
+                return
+            kept_pieces, kept_checks, kept_score = self.pieces[chunk.index], state['checks'], self.score(chunk.index)
+            self.pieces[chunk.index] = [piece]
+            state['checks'] = self.checks(chunk)
+            if self.score(chunk.index) <= kept_score:
+                self.pieces[chunk.index], state['checks'] = kept_pieces, kept_checks
+
+        await asyncio.gather(*(again(self.plan.chunks[index]) for index in outliers))
+        for index, reason in self.outliers().items():
+            chunk = self.plan.chunks[index]
+            self.states[index]['suspect'] = reason
+            self.warnings.append(
+                {
+                    'code': 'chunk_suspect',
+                    'message': f'Part {index + 1} ({format_timestamp(chunk.start)} to {format_timestamp(chunk.end)}) '
+                    f'may be missing speech: {reason}.',
+                }
+            )
+
+    def failure_message(self, failed: list[chunking.ChunkPlan]) -> str:
+        chunk = failed[0]
+        state = self.states[chunk.index]
+        message = (
+            f'Part {chunk.index + 1} of {len(self.plan.chunks)} ({format_timestamp(chunk.start)} to '
+            f'{format_timestamp(chunk.end)}) failed after {len(state["attempts"])} attempts: {state["error"]}'
+        )
+        if len(failed) > 1:
+            message += f' {len(failed) - 1} more parts failed too.'
+        return message
+
+    def failure(self, code: str, message: str) -> TranscriptionFailed:
+        """The failure of the transcription, with what its answered requests cost"""
+        request_usages = self.request_usages()
+        usage = {key: sum(u[key] for u in request_usages) for key in asdict(Usage())}
+        cost = pricing.estimate(self.provider.model, request_usages, datetime.now(UTC).date())
+        return TranscriptionFailed(code, message, usage=usage, cost=cost)
+
+    def request_usages(self) -> list[dict]:
+        """Every request that was answered, the retries included: each one is billed"""
+        return [a['usage'] for state in self.states for a in state['attempts'] if a.get('usage')]
+
+    def segments(self) -> list[dict]:
+        segments = [segment for index in range(len(self.plan.chunks)) for segment in self.chunk_segments(index)]
+        # A segment ends where the next one starts, across the cuts too
+        for segment, following in zip(segments, segments[1:], strict=False):
+            segment['end'] = max(segment['start'], following['start'])
+        return segments
+
+    def unparsed(self) -> int:
+        return sum(piece.unparsed for pieces in self.pieces for piece in pieces or [])
+
+    def chunk_summaries(self) -> list[dict]:
+        return [{key: value for key, value in state.items() if key != 'status'} for state in self.states]
 
 
 async def transcribe_media_task(download_id: str, media_name: str):
@@ -670,7 +1168,7 @@ async def transcribe_media_task(download_id: str, media_name: str):
         mark_failed(download_dir, download_id, media_name, 'interrupted', ERROR_MESSAGES['interrupted'])
         raise
     except TranscriptionFailed as e:
-        mark_failed(download_dir, download_id, media_name, e.code, e.message)
+        mark_failed(download_dir, download_id, media_name, e.code, e.message, **e.fields)
     except Exception as e:
         logger.exception('Transcription %s/%s raised', download_id, media_name)
         mark_failed(download_dir, download_id, media_name, 'unknown', f'{type(e).__name__}: {e}'[:500])

@@ -351,10 +351,10 @@ def test_crash_is_unknown(client, downloads_dir, genai, fake_audio, monkeypatch)
 
 
 def test_warnings_are_recorded_without_failing(client, downloads_dir, genai, fake_audio, monkeypatch):
-    async def ten_minutes(path):
-        return 600.0
+    async def six_and_a_half_minutes(path):
+        return 390.0
 
-    monkeypatch.setattr(audio, 'probe_duration', ten_minutes)
+    monkeypatch.setattr(audio, 'probe_duration', six_and_a_half_minutes)
     genai.answer = response(text=transcript_lines([(3, 'Speaker 1', 'Hello.')]))
     write_job(downloads_dir)
 
