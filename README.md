@@ -389,9 +389,13 @@ The endpoint has no authentication and no CSRF token, because the service is rea
 
 Tools:
 
-- `download_video(url, transcribe=false)` - starts a job for the URL, with the same URL rules as the web form: a YouTube link to a playlist or a channel is a tool error. With `transcribe` set, the service transcribes every media file of the job once the download completes. Without `GEMINI_API_KEY` the download still completes, and the job's transcription is `failed` with `not_configured`. The tool answers at once with the job and does not wait for the download.
-- `get_job(download_id, wait_seconds=0)` - the job's state, the video's title, duration and uploader, the error and `error_code` of a failed job, the files with their kind, size and URL, and each transcription with its state and estimated cost. With `wait_seconds` (at most 60) the tool answers once the job changes or ends, so an agent needs fewer calls.
-- `transcribe_file(download_id, filename)` - transcribes one media file of a completed job, with the same rules as the Transcribe button.
+- `download_video(url, transcribe=false)` - starts a job for a link to one video or one post, with the same URL rules as the web form: a link to a playlist or a channel that the service recognizes is a tool error. With `transcribe` set, the service transcribes every media file of the job once the download completes. A client without task support gets the job at once; see [MCP tasks](#mcp-tasks) for the others.
+- `get_job(download_id, wait_seconds=0)` - the job's state, the video's title, duration and uploader, the error and `error_code` of a failed job, the files with their kind, size and URL, and each transcription with its state and estimated cost. With `wait_seconds` (0 to 60) the tool answers once the job changes or ends, so an agent needs fewer calls.
+- `transcribe_file(download_id, filename)` - transcribes one media file of a completed job, with the same rules as the Transcribe button. It replaces an earlier transcript of the file.
+
+Without `GEMINI_API_KEY` the server offers no transcription: `download_video` has no `transcribe` parameter, there is no `transcribe_file` tool, and neither the descriptions nor the server instructions mention transcription. The service reads the key once at startup, so a change takes a restart. The transcripts resource stays, for transcripts made earlier.
+
+Each tool advertises the shape of its structured content as an `outputSchema`; all three return the same job object.
 
 A job's `state` is `pending`, `downloading`, `transcribing` (the download completed and a transcription of the job is queued or running), `completed` or `failed`. A tool result has the job as structured content, and a short text with the file URLs. Each file with an absolute URL is also a `resource_link`.
 

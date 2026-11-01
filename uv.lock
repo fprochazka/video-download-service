@@ -1610,6 +1610,7 @@ dependencies = [
 dev = [
     { name = "fastmcp-tasks" },
     { name = "httpx" },
+    { name = "jsonschema" },
     { name = "pytest" },
     { name = "ruff" },
 ]
@@ -1629,6 +1630,7 @@ requires-dist = [
 dev = [
     { name = "fastmcp-tasks", specifier = ">=4.1.4" },
     { name = "httpx", specifier = ">=0.28.1" },
+    { name = "jsonschema", specifier = ">=4.26.0" },
     { name = "pytest", specifier = ">=9.2.0" },
     { name = "ruff", specifier = ">=0.17.3" },
 ]

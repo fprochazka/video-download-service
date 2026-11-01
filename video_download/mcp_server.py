@@ -1,8 +1,8 @@
 """The MCP server at /mcp: a tool to download a video, tools to follow and transcribe its job, the job's text as resources.
 
 Every tool works on the same jobs as the web page, through jobs.submit_download and transcription.submit_transcription,
-and reads their state from metadata.json. download_video answers at once with the job's id, the agent follows the job
-with get_job, which can wait for the next change.
+and reads their state from metadata.json. download_video answers at once with the job, and the agent follows it with
+get_job, which can wait for the next change; a client of MCP tasks gets a task instead, see mcp_tasks.
 """
 
 import asyncio
@@ -10,6 +10,7 @@ import logging
 import uuid
 from collections.abc import Callable
 from pathlib import Path
+from typing import Annotated
 from urllib.parse import quote, unquote
 
 import mcp_types
@@ -19,6 +20,7 @@ from fastmcp.resources import ResourceContent, ResourceResult
 from fastmcp.server.dependencies import get_http_request
 from fastmcp.tools import ToolResult
 from mcp_types import ToolAnnotations
+from pydantic import BaseModel, Field
 
 from video_download import config, jobs, transcription
 from video_download.status import status_response
@@ -36,12 +38,97 @@ MAX_WAIT_SECONDS = 60
 
 TERMINAL_STATES = ('completed', 'failed')
 
-INSTRUCTIONS = """Downloads videos from YouTube, Instagram and the other sites yt-dlp supports, and transcribes them with \
-Gemini. Call download_video with the video's URL, set transcribe to true to get a transcript of every downloaded media \
-file. A download takes from seconds to many minutes: when download_video answers with a job instead of the final \
-result, call get_job with the job's download_id and wait_seconds=60 until its state is completed or failed. A \
-completed job lists its files with URLs to fetch them. The transcript text is also readable as the resource named in \
-the job's transcriptions."""
+VideoUrl = Annotated[
+    str,
+    Field(description='An http(s) link to the page of ONE video, or of one post'),
+]
+Transcribe = Annotated[
+    bool,
+    Field(
+        description='Also transcribe each downloaded video or audio file with Gemini after the download, about $0.13 per '
+        'hour of speech'
+    ),
+]
+DownloadId = Annotated[
+    str,
+    Field(description='The job id (a UUID) that download_video returned', json_schema_extra={'format': 'uuid'}),
+]
+WaitSeconds = Annotated[
+    int,
+    Field(
+        ge=0,
+        le=MAX_WAIT_SECONDS,
+        description='Wait up to this many seconds for the job to change or end, 0 answers at once',
+    ),
+]
+MediaFilename = Annotated[
+    str,
+    Field(description="The name of one of the job's video or audio files, a file of kind media in get_job's files"),
+]
+
+
+def instructions(transcription: bool) -> str:
+    """The server instructions; without a Gemini key nothing mentions transcription"""
+    lines = [
+        'Downloads videos from the sites yt-dlp supports'
+        + (' and transcribes them with Gemini.' if transcription else '.'),
+        'Call download_video with a link to one video or post'
+        + (', with transcribe=true for a transcript.' if transcription else '.'),
+        'When download_video answers with a job that has not finished yet, call get_job with its download_id and '
+        'wait_seconds=60 until the state is completed or failed.',
+        'The result lists the files with download URLs'
+        + (
+            "; a transcript is also readable as the resource named in the job's transcriptions."
+            if transcription
+            else '.'
+        ),
+    ]
+    return ' '.join(lines)
+
+
+def download_video_description(transcription: bool) -> str:
+    files = 'video, subtitles, info.json, transcripts' if transcription else 'video, subtitles, info.json'
+    resources = (
+        'the metadata, the download log and the transcripts' if transcription else 'the metadata and the download log'
+    )
+    return '\n'.join(
+        [
+            'Download one video, or one post with several videos, from any site yt-dlp supports: video platforms, '
+            'social networks and more.',
+            'Pass a link to that one video or post. Do not pass links to playlists, channels, profiles or other '
+            'collections, the service rejects those it recognizes. A video link that also refers to a playlist '
+            'downloads only the video.',
+            'A download takes from seconds to several minutes'
+            + (', longer with transcribe.' if transcription else '.'),
+            'If the answer is a job that has not finished yet, follow it with get_job, using wait_seconds to wait.',
+            f'The result lists every file ({files}) with a plain HTTP download URL, unauthenticated and reachable on '
+            f'the private network, and video-download://jobs/{{id}}/... resources for {resources}.',
+        ]
+    )
+
+
+def get_job_description(transcription: bool) -> str:
+    states = (
+        'pending, downloading, transcribing (the download completed, a transcription runs), completed or failed'
+        if transcription
+        else 'pending, downloading, completed or failed'
+    )
+    contents = 'the files with kind, size and download URL, '
+    if transcription:
+        contents += 'each transcription with its state and estimated cost, '
+    return '\n'.join(
+        [
+            f'The state of a job: {states}.',
+            f'The result lists {contents}and error and error_code when the job failed.',
+            'With wait_seconds the call answers once the job changes or ends, or after that many seconds.',
+        ]
+    )
+
+
+TRANSCRIBE_FILE_DESCRIPTION = """Transcribe one video or audio file of a completed job with Gemini, about $0.13 per \
+hour of speech.
+A new transcript replaces an earlier one of the same file.
+The call answers at once, follow the transcription with get_job."""
 
 
 def resource_uri(download_id: str, *parts: str) -> str:
@@ -101,66 +188,132 @@ def format_size(size: int | None) -> str:
     return ''
 
 
+class JobFile(BaseModel):
+    name: str
+    kind: str = Field(description='media (video or audio), subtitle, info (info.json) or transcript')
+    size: int | None = Field(description='bytes')
+    url: str = Field(description='plain HTTP download URL, no authentication')
+    media: str | None = Field(None, description='transcript: the media file it was made from')
+    lang: str | None = Field(None, description='subtitle: the track language, e.g. en or cs-orig')
+    auto_captions: bool | None = Field(None, description='subtitle: automatic captions')
+    resource_uri: str | None = Field(None, description='transcript: the MCP resource with its text')
+
+
+class JobTranscription(BaseModel):
+    status: str = Field(description='pending, running, completed or failed')
+    model: str | None
+    error: str | None
+    error_code: str | None
+    warnings: list[str]
+    cost_usd: float | None = Field(description='estimated from the token usage and list prices')
+    cost_estimated: bool | None
+    files: list[str]
+    transcript_resource_uri: str | None
+
+
+class JobResources(BaseModel):
+    metadata: str
+    log: str
+
+
+class Job(BaseModel):
+    download_id: str
+    state: str = Field(description='pending, downloading, transcribing, completed or failed')
+    done: bool = Field(description='the state is completed or failed')
+    message: str
+    url: str
+    job_url: str = Field(description='the job page in a browser')
+    title: str | None
+    duration: int | None = Field(description='seconds')
+    uploader: str | None
+    error: str | None
+    error_code: str | None
+    auto_transcribe: bool
+    transcription_available: bool
+    files: list[JobFile]
+    transcriptions: dict[str, JobTranscription] = Field(description='by media file name')
+    resources: JobResources
+    created_at: str
+    updated_at: str
+
+
+def without_titles(schema):
+    """The schema without the titles pydantic derives from the field names, which every agent would read for nothing"""
+    if isinstance(schema, list):
+        return [without_titles(item) for item in schema]
+    if not isinstance(schema, dict):
+        return schema
+    result = {}
+    for key, value in schema.items():
+        if key == 'title' and isinstance(value, str):
+            continue
+        if key in ('properties', '$defs'):
+            result[key] = {name: without_titles(item) for name, item in value.items()}
+        else:
+            result[key] = without_titles(value)
+    return result
+
+
+# The structured content of every tool result, advertised as each tool's outputSchema
+JOB_SCHEMA = without_titles(Job.model_json_schema())
+
+
 def job_summary(download_dir: Path, metadata: dict, base_url: str | None) -> dict:
     """The job as get_job returns it: state, video details, files with URLs, transcriptions with cost, resource URIs"""
     download_id = metadata['download_id']
     status = status_response(download_dir, metadata)
     state, message = job_state(metadata)
     base = base_url or ''
-    files = []
-    for entry in status.artifacts:
-        file = {
-            'name': entry.name,
-            'kind': entry.kind,
-            'size': entry.size,
-            'url': f'{base}/downloads/{download_id}/{quote(entry.name)}',
-        }
-        if entry.media:
-            file['media'] = entry.media
-        if entry.lang:
-            file['lang'] = entry.lang
-            file['auto_captions'] = bool(entry.auto)
-        if entry.kind == TRANSCRIPT:
-            file['resource_uri'] = resource_uri(download_id, 'transcripts', entry.name)
-        files.append(file)
-    transcriptions = {}
-    for media_name, item in status.transcriptions.items():
-        transcriptions[media_name] = {
-            'status': item.status,
-            'model': item.model,
-            'error': item.error,
-            'error_code': item.error_code,
-            'warnings': [warning.message for warning in item.warnings],
-            'cost_usd': item.cost.usd if item.cost else None,
-            'cost_estimated': item.cost.estimated if item.cost else None,
-            'files': item.files,
-            'transcript_resource_uri': next(
+    files = [
+        JobFile(
+            name=entry.name,
+            kind=entry.kind,
+            size=entry.size,
+            url=f'{base}/downloads/{download_id}/{quote(entry.name)}',
+            media=entry.media,
+            lang=entry.lang,
+            auto_captions=bool(entry.auto) if entry.lang else None,
+            resource_uri=resource_uri(download_id, 'transcripts', entry.name) if entry.kind == TRANSCRIPT else None,
+        )
+        for entry in status.artifacts
+    ]
+    transcriptions = {
+        media_name: JobTranscription(
+            status=item.status,
+            model=item.model,
+            error=item.error,
+            error_code=item.error_code,
+            warnings=[warning.message for warning in item.warnings],
+            cost_usd=item.cost.usd if item.cost else None,
+            cost_estimated=item.cost.estimated if item.cost else None,
+            files=item.files,
+            transcript_resource_uri=next(
                 (resource_uri(download_id, 'transcripts', name) for name in item.files if name.endswith('.md')), None
             ),
-        }
-    return {
-        'download_id': download_id,
-        'state': state,
-        'done': state in TERMINAL_STATES,
-        'message': message,
-        'url': status.url,
-        'job_url': f'{base}/jobs/{download_id}',
-        'title': status.title,
-        'duration': status.duration,
-        'uploader': status.uploader,
-        'error': status.error,
-        'error_code': status.error_code,
-        'auto_transcribe': status.auto_transcribe,
-        'transcription_available': status.transcription_available,
-        'files': files,
-        'transcriptions': transcriptions,
-        'resources': {
-            'metadata': resource_uri(download_id, 'metadata'),
-            'log': resource_uri(download_id, 'log'),
-        },
-        'created_at': status.created_at,
-        'updated_at': status.updated_at,
+        )
+        for media_name, item in status.transcriptions.items()
     }
+    job = Job(
+        download_id=download_id,
+        state=state,
+        done=state in TERMINAL_STATES,
+        message=message,
+        url=status.url,
+        job_url=f'{base}/jobs/{download_id}',
+        title=status.title,
+        duration=status.duration,
+        uploader=status.uploader,
+        error=status.error,
+        error_code=status.error_code,
+        auto_transcribe=status.auto_transcribe,
+        transcription_available=status.transcription_available,
+        files=files,
+        transcriptions=transcriptions,
+        resources=JobResources(metadata=resource_uri(download_id, 'metadata'), log=resource_uri(download_id, 'log')),
+        created_at=status.created_at,
+        updated_at=status.updated_at,
+    )
+    return job.model_dump(mode='json')
 
 
 def summary_text(summary: dict) -> str:
@@ -241,17 +394,15 @@ def read_job_file(download_id: str, name: str) -> Path:
     return path
 
 
-def create_server(get_worker: Callable[[], JobWorker]) -> FastMCP:
-    """The MCP server; get_worker returns the app's job worker, which the app's lifespan starts"""
-    server = FastMCP('video-download', instructions=INSTRUCTIONS)
+def create_server(get_worker: Callable[[], JobWorker], transcription_available: bool) -> FastMCP:
+    """The MCP server; get_worker returns the app's job worker, which the app's lifespan starts.
 
-    @server.tool(annotations=ToolAnnotations(read_only_hint=False, destructive_hint=False, open_world_hint=True))
-    async def download_video(url: str, transcribe: bool = False) -> ToolResult:
-        """Download the video at the URL with yt-dlp, with its subtitles and info.json.
+    Without transcription_available (no GEMINI_API_KEY) the server offers no transcription at all: download_video has
+    no transcribe parameter and there is no transcribe_file tool, so an agent never sees an option that cannot work.
+    """
+    server = FastMCP('video-download', instructions=instructions(transcription_available))
 
-        transcribe: also transcribe every downloaded media file with Gemini once the download completes.
-        Answers at once with the job, follow it with get_job until its state is completed or failed.
-        """
+    async def start_download(url: str, transcribe: bool) -> ToolResult:
         try:
             download_id = jobs.submit_download(get_worker(), url, auto_transcribe=transcribe)
         except InvalidDownloadUrl as e:
@@ -260,30 +411,53 @@ def create_server(get_worker: Callable[[], JobWorker]) -> FastMCP:
         download_dir = config.DOWNLOADS_DIR / download_id
         return job_result(download_dir, load_metadata(download_dir), request_base_url())
 
-    @server.tool(annotations=ToolAnnotations(read_only_hint=True, idempotent_hint=True, open_world_hint=False))
-    async def get_job(download_id: str, wait_seconds: int = 0) -> ToolResult:
-        """The state of a job: pending, downloading, transcribing, completed or failed, with its files and transcripts.
+    download_tool = server.tool(
+        name='download_video',
+        title='Download a video',
+        description=download_video_description(transcription_available),
+        output_schema=JOB_SCHEMA,
+        annotations=ToolAnnotations(read_only_hint=False, destructive_hint=False, open_world_hint=True),
+    )
+    if transcription_available:
 
-        wait_seconds (at most 60): wait until the job changes or is done before answering, instead of answering at once.
-        """
+        @download_tool
+        async def download_and_transcribe(url: VideoUrl, transcribe: Transcribe = False) -> ToolResult:
+            return await start_download(url, transcribe)
+
+    else:
+
+        @download_tool
+        async def download_video(url: VideoUrl) -> ToolResult:
+            return await start_download(url, False)
+
+    @server.tool(
+        title='Get a download job',
+        description=get_job_description(transcription_available),
+        output_schema=JOB_SCHEMA,
+        annotations=ToolAnnotations(read_only_hint=True, idempotent_hint=True, open_world_hint=False),
+    )
+    async def get_job(download_id: DownloadId, wait_seconds: WaitSeconds = 0) -> ToolResult:
         download_id, download_dir = job_dir(download_id)
         metadata = load_metadata(download_dir)
         if wait_seconds > 0:
             metadata = await wait_for_change(download_dir, metadata, min(wait_seconds, MAX_WAIT_SECONDS))
         return job_result(download_dir, metadata, request_base_url())
 
-    @server.tool(annotations=ToolAnnotations(read_only_hint=False, destructive_hint=False, open_world_hint=True))
-    async def transcribe_file(download_id: str, filename: str) -> ToolResult:
-        """Transcribe one media file of a completed job with Gemini, replacing an earlier transcript of it.
+    if transcription_available:
 
-        filename is the name of a file of kind media from get_job. Follow the transcription with get_job.
-        """
-        download_id, download_dir = job_dir(download_id)
-        try:
-            metadata = transcription.submit_transcription(get_worker(), download_id, filename)
-        except transcription.TranscriptionRejected as e:
-            raise ToolError(e.message) from None
-        return job_result(download_dir, metadata, request_base_url())
+        @server.tool(
+            title='Transcribe a downloaded file',
+            description=TRANSCRIBE_FILE_DESCRIPTION,
+            output_schema=JOB_SCHEMA,
+            annotations=ToolAnnotations(read_only_hint=False, destructive_hint=False, open_world_hint=True),
+        )
+        async def transcribe_file(download_id: DownloadId, filename: MediaFilename) -> ToolResult:
+            download_id, download_dir = job_dir(download_id)
+            try:
+                metadata = transcription.submit_transcription(get_worker(), download_id, filename)
+            except transcription.TranscriptionRejected as e:
+                raise ToolError(e.message) from None
+            return job_result(download_dir, metadata, request_base_url())
 
     @server.resource(
         f'{RESOURCE_SCHEME}://jobs/{{download_id}}/metadata',

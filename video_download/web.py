@@ -54,6 +54,8 @@ async def lifespan(fastapi_app: FastAPI):
         gc_task = asyncio.create_task(cleanup.run_periodically(config.DOWNLOADS_DIR, gc_settings))
     else:
         logger.info('GC is disabled')
+    mcp_app = create_mcp_app(fastapi_app)
+    fastapi_app.state.mcp_app = mcp_app
     async with mcp_app.lifespan(mcp_app):
         yield
     if gc_task is not None:
@@ -63,21 +65,33 @@ async def lifespan(fastapi_app: FastAPI):
     await worker.stop()
 
 
-mcp_server = create_server(lambda: app.state.worker)
-mcp_server.add_extension(JobTasksExtension())
-# Stateless: each MCP request stands on its own and every tool reads the job from disk, so no session outlives a restart.
-# The Host guard keeps a page on another site from reaching the endpoint through DNS rebinding; there is no auth or
-# CSRF token on /mcp, the service is only reachable on the tailnet
-mcp_app = mcp_server.http_app(
-    path='/mcp',
-    stateless_http=True,
-    host_origin_protection=True,
-    allowed_hosts=config.mcp_allowed_hosts(),
-)
-
 app = FastAPI(title='Video Download Service', lifespan=lifespan)
-# A route and not a mount, so /mcp itself is the endpoint and not a redirect to /mcp/; the MCP app routes it again
-app.router.routes.append(Route('/mcp', endpoint=mcp_app))
+
+
+def create_mcp_app(fastapi_app: FastAPI):
+    """The MCP server's ASGI app; which tools it offers depends on the configuration, read once at startup"""
+    server = create_server(lambda: fastapi_app.state.worker, config.transcription_settings().available)
+    server.add_extension(JobTasksExtension())
+    # Stateless: each MCP request stands on its own and every tool reads the job from disk, so no session outlives a
+    # restart. The Host guard keeps a page on another site from reaching the endpoint through DNS rebinding; there is
+    # no auth or CSRF token on /mcp, the service is only reachable on the tailnet
+    return server.http_app(
+        path='/mcp',
+        stateless_http=True,
+        host_origin_protection=True,
+        allowed_hosts=config.mcp_allowed_hosts(),
+    )
+
+
+class McpEndpoint:
+    """/mcp, served by the MCP app the lifespan built; the MCP app routes the request again"""
+
+    async def __call__(self, scope, receive, send):
+        await scope['app'].state.mcp_app(scope, receive, send)
+
+
+# A route and not a mount, so /mcp itself is the endpoint and not a redirect to /mcp/
+app.router.routes.append(Route('/mcp', endpoint=McpEndpoint()))
 
 
 def index_page(request: Request) -> HTMLResponse:

@@ -1,5 +1,6 @@
 import json
 
+import jsonschema
 import pytest
 from fastmcp import Client
 from fastmcp.exceptions import ToolError
@@ -45,6 +46,7 @@ async def test_download_video_answers_a_tasks_client_with_a_task_that_completes_
         await jobs_done()
         status = await task.status()
         result = await task.result()
+        schema = {tool.name: tool.output_schema for tool in await client.list_tools()}['download_video']
 
     # The task id is the job id, so the job page and get_job work with it too
     assert task.task_id == result.structured_content['download_id']
@@ -53,6 +55,7 @@ async def test_download_video_answers_a_tasks_client_with_a_task_that_completes_
     assert result.is_error is False
     assert result.structured_content['state'] == 'completed'
     assert result.structured_content['files'][0]['url'] == f'{BASE_URL}/downloads/{task.task_id}/{MEDIA}'
+    jsonschema.validate(result.structured_content, schema)
 
 
 @pytest.mark.anyio
