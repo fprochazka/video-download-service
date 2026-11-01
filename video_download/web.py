@@ -14,7 +14,8 @@ from pydantic import BaseModel
 from video_download import cleanup, config, transcription
 from video_download.csrf import page_token, require_csrf, set_token_cookie
 from video_download.jobs import create_job, download_video_task, fail_interrupted_downloads
-from video_download.storage import ACTIVE_STATUSES, job_artifacts, load_metadata, media_files, remove_artifacts
+from video_download.status import status_response
+from video_download.storage import ACTIVE_STATUSES, job_artifacts, load_metadata, remove_artifacts
 from video_download.urls import InvalidDownloadUrl, resolve_download_url
 from video_download.worker import DOWNLOAD, TRANSCRIPTION, JobWorker
 
@@ -30,102 +31,6 @@ logger = logging.getLogger(__name__)
 
 class DownloadInitResponse(BaseModel):
     download_id: str
-
-
-class Artifact(BaseModel):
-    name: str
-    kind: str  # media, subtitle, info, transcript
-    size: int | None = None
-    media: str | None = None  # transcript: the media file it was made from
-    lang: str | None = None  # subtitle track key, e.g. en, en-US, cs-orig
-    auto: bool | None = None  # subtitle is automatic captions
-
-
-class DeletedFile(BaseModel):
-    name: str
-    kind: str
-    size: int | None = None
-    deleted_at: str
-    reason: str  # user, gc
-
-
-class TranscriptionUsage(BaseModel):
-    prompt_tokens: int = 0
-    output_tokens: int = 0
-    thinking_tokens: int = 0
-    prompt_audio_tokens: int | None = None  # None for transcriptions stored before it was recorded
-
-
-class TranscriptionPrices(BaseModel):
-    model: str | None = None
-    input_text: float
-    input_audio: float
-    output: float
-    as_of: str | None = None
-    source: str | None = None
-
-
-class TranscriptionCost(BaseModel):
-    usd: float
-    estimated: bool = True
-    prices: TranscriptionPrices
-
-
-class TranscriptionWarning(BaseModel):
-    code: str
-    message: str
-
-
-class Transcription(BaseModel):
-    status: str  # pending, running, completed, failed
-    model: str | None = None
-    requested_at: str | None = None
-    started_at: str | None = None
-    completed_at: str | None = None
-    error: str | None = None
-    error_code: str | None = None
-    warnings: list[TranscriptionWarning] = []
-    usage: TranscriptionUsage | None = None
-    # Estimated from usage and list prices, None for a model without a known price
-    cost: TranscriptionCost | None = None
-    files: list[str] = []
-
-
-class DownloadStatus(BaseModel):
-    download_id: str
-    status: str  # pending, downloading, completed, failed
-    url: str
-    download_url: str | None = None
-    extractor: str | None = None
-    files: list[str] = []
-    artifacts: list[Artifact] = []
-    deleted_files: list[DeletedFile] = []
-    error: str | None = None
-    error_code: str | None = None
-    error_type: str | None = None
-    used_youtube_cookies: bool | None = None
-    subtitles_error: str | None = None
-    transcriptions: dict[str, Transcription] = {}
-    # Whether the server can transcribe at all (GEMINI_API_KEY is set), the page disables its Transcribe buttons if not
-    transcription_available: bool = False
-    created_at: str
-    updated_at: str
-    completed_at: str | None = None
-    # Video metadata fields (optional)
-    title: str | None = None
-    duration: int | None = None
-    uploader: str | None = None
-    upload_date: str | None = None
-    description: str | None = None
-    ext: str | None = None
-    format: str | None = None
-    resolution: str | None = None
-    thumbnail: str | None = None
-    webpage_url: str | None = None
-    id: str | None = None
-    channel: str | None = None
-    view_count: int | None = None
-    like_count: int | None = None
 
 
 @asynccontextmanager
@@ -210,20 +115,6 @@ async def get_download_status(download_id: uuid.UUID):
         raise HTTPException(status_code=404, detail='Download not found')
 
     return status_response(download_dir, metadata)
-
-
-def status_response(download_dir: Path, metadata: dict) -> DownloadStatus:
-    return DownloadStatus(
-        **(
-            metadata
-            | {
-                'files': media_files(metadata),
-                'artifacts': job_artifacts(download_dir, metadata),
-                'transcriptions': transcription.transcriptions_with_cost(metadata),
-                'transcription_available': config.transcription_settings().available,
-            }
-        )
-    )
 
 
 @app.get('/downloads/{download_id}/{filename}')
