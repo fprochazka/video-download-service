@@ -20,9 +20,13 @@ class AudioExtractionError(Exception):
     pass
 
 
-async def run(args: list[str], timeout: float) -> tuple[int, bytes, bytes]:
+async def run(args: list[str], timeout: float, cwd: Path | None = None) -> tuple[int, bytes, bytes]:
     process = await asyncio.create_subprocess_exec(
-        *args, stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+        *args,
+        stdin=asyncio.subprocess.DEVNULL,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+        cwd=cwd,
     )
     try:
         stdout, stderr = await asyncio.wait_for(process.communicate(), timeout)

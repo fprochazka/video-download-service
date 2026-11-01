@@ -57,7 +57,7 @@ This ensures consistent code style and catches common issues.
 
 GitHub Actions runs the same checks on every push to `master` and on pull requests (`.github/workflows/ci.yml`), and also builds the Docker image, checks that yt-dlp in it finds Deno and ffmpeg, and checks that the app starts.
 
-The frontend tests run the page script in Node.js against a stubbed DOM, pytest skips them when `node` is not installed.
+The frontend tests run the page script in Node.js against a stubbed DOM, pytest skips them when `node` is not installed. The audio tests skip without `ffmpeg`.
 
 The downloads directory defaults to `./downloads` and can be changed with the `DOWNLOADS_DIR` environment variable.
 
@@ -454,6 +454,7 @@ video-download/
 │   ├── gemini.py        # Gemini Developer API calls (Files API upload, generate_content)
 │   ├── pricing.py       # List prices and the estimated cost of a transcription
 │   ├── audio.py         # ffmpeg audio extraction and ffprobe duration
+│   ├── vad.py           # Speech and pauses of a recording, from Silero VAD or ffmpeg silencedetect
 │   ├── ytdlp.py         # yt-dlp options and the files and metadata a download produced
 │   ├── subtitles.py     # Which subtitle tracks a job downloads
 │   ├── cleanup.py       # Garbage collection of large old media

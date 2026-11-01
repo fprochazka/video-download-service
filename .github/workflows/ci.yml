@@ -42,6 +42,10 @@ jobs:
       - name: Install dependencies
         run: uv sync --locked --dev
 
+      # The audio extraction and voice activity detection tests run ffmpeg, pytest skips them without it
+      - name: Install ffmpeg
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg
+
       # The runner has Node.js, so the page script tests run here instead of being skipped
       - name: Run tests
         run: uv run pytest
@@ -66,6 +70,14 @@ jobs:
           cat ytdlp.log
           grep -q 'JS runtimes: deno' ytdlp.log
           grep -q 'exe versions: ffmpeg' ytdlp.log
+
+      # The transcription cuts long recordings at the pauses Silero finds; its native library must load in the image
+      - name: The voice activity detector runs
+        run: |
+          docker run --rm --user 1000:1000 video-download:ci sh -c \
+            'ffmpeg -nostdin -loglevel error -f lavfi -i sine=duration=3 -ac 1 -c:a libopus /tmp/tone.ogg && python -m video_download.vad /tmp/tone.ogg' > vad.json
+          cat vad.json
+          grep -q '"regions"' vad.json
 
       - name: The app starts and serves the page
         run: |

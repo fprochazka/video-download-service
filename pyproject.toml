@@ -8,6 +8,7 @@ dependencies = [
     "fastapi>=0.162.0",
     "fastmcp>=4.1.4",
     "google-genai>=2.34.0",
+    "pysilero-vad>=3.4.0",
     "python-multipart>=0.0.32",
     "uvicorn>=0.54.0",
     "yt-dlp[default,deno]>=2026.10.26",
