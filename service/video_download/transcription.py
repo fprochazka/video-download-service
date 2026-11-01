@@ -647,7 +647,93 @@ def log_answer(label: str, response: ProviderResponse):
     )
 
 
-async def run_pipeline(download_id: str, download_dir: Path, media_name: str, metadata: dict, provider: Provider):
+@dataclass
+class Recording:
+    """The audio of one media file of a job, ready to transcribe"""
+
+    download_id: str
+    download_dir: Path
+    media_name: str
+    # The extracted 16 kHz mono Opus audio, deleted after the transcription
+    audio_path: Path
+    duration: float
+    context: Context
+
+
+@dataclass
+class TranscriberResult:
+    # {start, end, speaker, text}, start and end in seconds from the start of the media
+    segments: list[dict]
+    usage: dict
+    cost: dict | None
+    # The transcriber's own warnings, after those of the checks every transcript gets
+    warnings: list[dict] = field(default_factory=list)
+    # More fields of the .transcript.json
+    fields: dict = field(default_factory=dict)
+    # Whether to warn about repeated lines; see sanity_warnings
+    check_repeats: bool = True
+
+
+class Transcriber(Protocol):
+    """One way to turn a recording into segments: a provider's requests and the checks of its answers"""
+
+    model: str
+
+    async def transcribe(self, recording: Recording) -> TranscriberResult: ...
+
+
+class GeminiTranscriber:
+    """A recording under 7 minutes in one request, a longer one in chunks; see ChunkedRun"""
+
+    def __init__(self, provider: Provider):
+        self.provider = provider
+        self.model = provider.model
+
+    async def transcribe(self, recording: Recording) -> TranscriberResult:
+        if recording.duration < chunking.CHUNKED_FROM_SECONDS:
+            transcript, usage = await transcribe_whole(
+                self.provider, recording.audio_path, recording.duration, recording.context, recording.download_id
+            )
+            segments, unparsed = transcript.segments, transcript.unparsed
+            # Each request is priced on its own, the long-context tier of a model applies per request
+            request_usages = [asdict(usage)]
+            warnings = []
+            fields = {}
+        else:
+            chunked = ChunkedRun(
+                self.provider,
+                recording.download_id,
+                recording.download_dir,
+                recording.media_name,
+                recording.audio_path,
+                recording.duration,
+                recording.context,
+            )
+            await chunked.run()
+            segments, unparsed, request_usages = chunked.segments(), chunked.unparsed(), chunked.request_usages()
+            usage = Usage(**{key: sum(u[key] for u in request_usages) for key in asdict(Usage())})
+            warnings = chunked.warnings
+            fields = {
+                'speech_detection': chunked.speech_source,
+                'chapters': [{'start': start, 'title': title} for start, title in chunked.plan.chapters],
+                'chunks': chunked.chunk_summaries(),
+            }
+        if unparsed:
+            warnings.append(
+                {
+                    'code': 'unparsed_lines',
+                    'message': f'{unparsed} lines of the answer were not [HH:MM:SS] transcript lines and were left out.',
+                }
+            )
+        cost = pricing.estimate(self.model, request_usages, datetime.now(UTC).date())
+        return TranscriberResult(segments, asdict(usage), cost, warnings, fields, check_repeats='chunks' not in fields)
+
+
+def make_transcriber(settings: config.TranscriptionSettings) -> Transcriber:
+    return GeminiTranscriber(make_provider(settings))
+
+
+async def run_pipeline(download_id: str, download_dir: Path, media_name: str, metadata: dict, transcriber: Transcriber):
     media_path = download_dir / media_name
     if not media_path.is_file():
         raise TranscriptionFailed('media_missing', ERROR_MESSAGES['media_missing'])
@@ -655,60 +741,34 @@ async def run_pipeline(download_id: str, download_dir: Path, media_name: str, me
     context = build_context(download_dir, metadata)
 
     audio_path = download_dir / f'.{Path(media_name).stem}.transcribe-{uuid.uuid4().hex[:8]}.{audio.AUDIO_EXTENSION}'
-    chunked = None
     try:
         try:
             await audio.extract_audio(media_path, audio_path)
         except audio.AudioExtractionError as e:
             raise TranscriptionFailed('audio_extraction_failed', str(e)) from e
-
-        if duration < chunking.CHUNKED_FROM_SECONDS:
-            transcript, usage = await transcribe_whole(provider, audio_path, duration, context, download_id)
-            segments, unparsed = transcript.segments, transcript.unparsed
-            # Each request is priced on its own, the long-context tier of a model applies per request
-            request_usages = [asdict(usage)]
-            warnings = []
-        else:
-            chunked = ChunkedRun(provider, download_id, download_dir, media_name, audio_path, duration, context)
-            await chunked.run()
-            segments, unparsed, request_usages = chunked.segments(), chunked.unparsed(), chunked.request_usages()
-            usage = Usage(**{key: sum(u[key] for u in request_usages) for key in asdict(Usage())})
-            warnings = chunked.warnings
+        recording = Recording(download_id, download_dir, media_name, audio_path, duration, context)
+        result = await transcriber.transcribe(recording)
     finally:
         audio_path.unlink(missing_ok=True)
 
-    warnings = sanity_warnings(segments, duration, context.subtitles, repeats=chunked is None) + warnings
-    if unparsed:
-        warnings.append(
-            {
-                'code': 'unparsed_lines',
-                'message': f'{unparsed} lines of the answer were not [HH:MM:SS] transcript lines and were left out.',
-            }
-        )
-    usage_fields = asdict(usage)
-    cost = pricing.estimate(provider.model, request_usages, datetime.now(UTC).date())
+    segments = result.segments
+    warnings = sanity_warnings(segments, duration, context.subtitles, repeats=result.check_repeats) + result.warnings
     transcript = {
         'media': media_name,
-        'model': provider.model,
+        'model': transcriber.model,
         'duration': duration,
         'subtitles_reference': context.subtitles_track,
         'segments': segments,
-        'usage': usage_fields,
-        'cost': cost,
+        'usage': result.usage,
+        'cost': result.cost,
         'warnings': warnings,
         'created_at': storage.now_iso(),
-    }
-    if chunked:
-        transcript |= {
-            'speech_detection': chunked.speech_source,
-            'chapters': [{'start': start, 'title': title} for start, title in chunked.plan.chapters],
-            'chunks': chunked.chunk_summaries(),
-        }
+    } | result.fields
     md_name, json_name = transcript_names(media_name)
     write_atomic(download_dir / json_name, lambda f: json.dump(transcript, f, indent=2, ensure_ascii=False))
     markdown = render_markdown(metadata.get('title'), media_name, transcript, duration)
     write_atomic(download_dir / md_name, lambda f: f.write(markdown))
-    return [md_name, json_name], warnings, usage_fields, cost
+    return [md_name, json_name], warnings, result.usage, result.cost
 
 
 # --- Long recordings: chunks transcribed in parallel, each validated and retried on its own
@@ -1218,9 +1278,9 @@ async def transcribe_media_task(download_id: str, media_name: str):
         )
         if not settings.available:
             raise TranscriptionFailed('not_configured', ERROR_MESSAGES['not_configured'])
-        provider = make_provider(settings)
+        transcriber = make_transcriber(settings)
         logger.info('Transcription %s/%s started with %s', download_id, media_name, settings.model)
-        files, warnings, usage, cost = await run_pipeline(download_id, download_dir, media_name, metadata, provider)
+        files, warnings, usage, cost = await run_pipeline(download_id, download_dir, media_name, metadata, transcriber)
         store_result(
             download_dir,
             media_name,
