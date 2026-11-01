@@ -1,0 +1,46 @@
+[project]
+name = "video-download-cli"
+version = "0.1.0"
+description = "CLI for the tools of the video download service's MCP server"
+authors = [
+    {name = "Filip Prochazka"}
+]
+requires-python = ">=3.11"
+dependencies = [
+    "mcp-to-cli-kit>=0.2.0,<0.3",
+]
+
+[project.scripts]
+video-download = "video_download_cli.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/video_download_cli"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "C4", "SIM"]
+
+[tool.ruff.format]
+quote-style = "double"
+
+[dependency-groups]
+dev = [
+    "click>=8.1",
+    "mypy>=1.15",
+    "pytest>=8.0",
+    "ruff>=0.14",
+]
+
+[tool.mypy]
+strict = true
+python_version = "3.11"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

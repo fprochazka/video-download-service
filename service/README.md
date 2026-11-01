@@ -442,6 +442,8 @@ The service is also an MCP server, so an agent such as Claude Code can download 
 claude mcp add --transport http video-download https://video-download.your-tailnet-name.ts.net/mcp
 ```
 
+The [`video-download` CLI](../cli/README.md) calls the same tools from a shell, and its Claude Code skill tells an agent how to use them.
+
 The endpoint has no authentication and no CSRF token, because the service is reachable only on the tailnet. It checks the `Host` header instead, so a web page cannot reach it through DNS rebinding. It accepts `localhost`, the host of `PUBLIC_BASE_URL`, and the hosts in `MCP_ALLOWED_HOSTS`, a comma-separated list. Any other host gets HTTP 421, so set `PUBLIC_BASE_URL` in `app.env` to the tailnet URL (see `app.env.example`) before you use the endpoint through Tailscale.
 
 Tools:

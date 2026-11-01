@@ -58,6 +58,39 @@ jobs:
       - name: Run tests
         run: uv run pytest
 
+  cli:
+    name: CLI (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: cli
+    strategy:
+      matrix:
+        python-version: ["3.11", "3.14"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v7
+        with:
+          python-version: ${{ matrix.python-version }}
+          enable-cache: true
+          cache-dependency-glob: cli/uv.lock
+
+      - name: Install dependencies
+        run: uv sync --locked --dev
+
+      - name: Ruff check
+        run: uv run ruff check --output-format github .
+
+      - name: Ruff format check
+        run: uv run ruff format --check .
+
+      - name: Mypy
+        run: uv run mypy --strict src tests
+
+      - name: Run tests
+        run: uv run pytest
+
   docker:
     # The image is what runs in production, built by hand on the server, so a broken Dockerfile
     # or a dependency without a wheel for the base image would otherwise only show up on deploy.

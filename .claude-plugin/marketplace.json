@@ -1,0 +1,18 @@
+{
+  "name": "fprochazka-video-download-service",
+  "description": "CLI for the video download service's MCP server, with a skill for Claude Code",
+  "owner": {
+    "name": "Filip Procházka"
+  },
+  "plugins": [
+    {
+      "name": "video-download-cli",
+      "description": "Skill for downloading videos, their subtitles and transcripts with the video-download CLI",
+      "version": "0.1.0",
+      "author": {
+        "name": "Filip Procházka"
+      },
+      "source": "./coding-agent-plugins/claude-code"
+    }
+  ]
+}

@@ -1,0 +1,9 @@
+{
+  "name": "video-download-cli",
+  "version": "0.1.0",
+  "description": "Skill for downloading videos, their subtitles and transcripts with the video-download CLI",
+  "author": {
+    "name": "Filip Procházka"
+  },
+  "skills": "./skills/"
+}
