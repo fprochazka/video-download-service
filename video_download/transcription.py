@@ -35,7 +35,7 @@ from video_download.storage import (
     update_metadata,
     write_atomic,
 )
-from video_download.subtitles import ORIGINAL_AUTO_SUFFIX, vtt_cues
+from video_download.subtitles import ORIGINAL_AUTO_SUFFIX, CaptionWord, vtt_cues, vtt_words
 from video_download.worker import TRANSCRIPTION, JobWorker
 
 logger = logging.getLogger(__name__)
@@ -119,6 +119,8 @@ class Context:
     chapters: list[tuple[float, str]] = field(default_factory=list)
     subtitles_track: str | None = None
     subtitles: list[tuple[float, str]] = field(default_factory=list)
+    # The words of the same track with their times, for where to cut a long recording
+    caption_words: list[CaptionWord] = field(default_factory=list)
 
 
 def escape_untrusted(text: str) -> str:
@@ -140,16 +142,17 @@ def subtitle_preference(entry: dict) -> tuple:
     return (bool(entry.get('auto')), not lang.endswith(ORIGINAL_AUTO_SUFFIX))
 
 
-def pick_subtitles(download_dir: Path, artifacts: list[dict]) -> tuple[str | None, list[tuple[float, str]]]:
+def pick_subtitles(download_dir: Path, artifacts: list[dict]) -> tuple[str | None, list[tuple[float, str]], list]:
+    """The name, cues and words of the preferred subtitle track"""
     candidates = [a for a in artifacts if a.get('kind') == SUBTITLE and a['name'].endswith('.vtt')]
     for entry in sorted(candidates, key=subtitle_preference):
         try:
-            cues = vtt_cues((download_dir / entry['name']).read_text(encoding='utf-8', errors='replace'))
+            content = (download_dir / entry['name']).read_text(encoding='utf-8', errors='replace')
         except OSError:
             continue
-        if cues:
-            return entry['name'], cues
-    return None, []
+        if cues := vtt_cues(content):
+            return entry['name'], cues, vtt_words(content)
+    return None, [], []
 
 
 def build_context(download_dir: Path, metadata: dict) -> Context:
@@ -158,7 +161,7 @@ def build_context(download_dir: Path, metadata: dict) -> Context:
     for chapter in (info.get('chapters') or [])[:MAX_CHAPTERS]:
         if isinstance(chapter, dict) and chapter.get('title'):
             chapters.append((float(chapter.get('start_time') or 0), str(chapter['title'])))
-    track, cues = pick_subtitles(download_dir, job_artifacts(download_dir, metadata))
+    track, cues, words = pick_subtitles(download_dir, job_artifacts(download_dir, metadata))
     return Context(
         title=metadata.get('title'),
         uploader=metadata.get('uploader'),
@@ -167,6 +170,7 @@ def build_context(download_dir: Path, metadata: dict) -> Context:
         chapters=chapters,
         subtitles_track=track,
         subtitles=cues,
+        caption_words=words,
     )
 
 
@@ -824,7 +828,9 @@ class ChunkedRun:
         detected = await vad.detect_speech(self.audio_path, self.duration, logger)
         if detected:
             self.speech_source, self.speech = detected.source, detected.regions
-        self.plan = chunking.plan_chunks(self.duration, self.speech, self.context.chapters, chunk_lengths())
+        self.plan = chunking.plan_chunks(
+            self.duration, self.speech, self.context.chapters, chunk_lengths(), self.context.caption_words
+        )
         self.states = [self.initial_state(chunk) for chunk in self.plan.chunks]
         self.pieces = [None] * len(self.plan.chunks)
         logger.info(
@@ -856,6 +862,7 @@ class ChunkedRun:
             'cut': chunk.cut.method,
             'snap_distance': chunk.cut.snap_distance,
             'pause': chunk.cut.pause,
+            'boundary': chunk.cut.boundary,
             'chapters': chunk.chapters,
             'status': 'pending',
             'attempts': [],

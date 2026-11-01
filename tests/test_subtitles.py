@@ -1,6 +1,7 @@
 import pytest
 
 from video_download import subtitles
+from video_download.subtitles import CaptionWord, vtt_words
 
 # A part of the ~100 languages YouTube offers as machine translations of the speech recognition track
 TRANSLATION_LANGUAGES = ['ab', 'af', 'ar', 'cs', 'de', 'en', 'es', 'fr', 'hu', 'ja', 'pl', 'sk', 'uk', 'zh-Hans']
@@ -85,3 +86,54 @@ def test_subtitleslangs_match_only_the_selected_keys():
 )
 def test_subtitle_track_of(filename, expected):
     assert subtitles.subtitle_track_of(filename, {'en': False, 'en-GB': False, 'cs-orig': True}) == expected
+
+
+# YouTube starts each cue with a line of one space or with the rolled-up line before it
+YOUTUBE_ASR = '\n'.join(
+    [
+        'WEBVTT',
+        'Kind: captions',
+        'Language: en',
+        '',
+        '00:00:00.000 --> 00:00:02.070 align:start position:0%',
+        ' ',
+        'AI<00:00:00.320><c> is</c><00:00:00.440><c> not</c><00:00:00.680><c> smart.</c>',
+        '',
+        '00:00:02.070 --> 00:00:02.080 align:start position:0%',
+        'AI is not smart.',
+        ' ',
+        '',
+        '00:00:02.080 --> 00:00:04.030 align:start position:0%',
+        'AI is not smart.',
+        '&gt;&gt; Why<00:00:02.760><c> not?</c>',
+    ]
+)
+
+
+def test_youtube_speech_recognition_captions_give_each_word_its_time():
+    assert vtt_words(YOUTUBE_ASR) == [
+        CaptionWord(0.0, 'AI'),
+        CaptionWord(0.32, 'is'),
+        CaptionWord(0.44, 'not'),
+        CaptionWord(0.68, 'smart.'),
+        CaptionWord(2.08, 'Why', speaker_change=True),
+        CaptionWord(2.76, 'not?'),
+    ]
+
+
+def test_words_of_manual_subtitles_are_spread_over_their_cue():
+    content = (
+        'WEBVTT\n\n'
+        '00:00:01.000 --> 00:00:03.000\n- Did you &amp; Kai go?\n\n'
+        '00:00:03.000 --> 00:00:04.000\n- Did you &amp; Kai go?\n\n'
+        '00:00:04.000 --> 00:00:05.000\n<i>Yes.</i>\n'
+    )
+
+    assert vtt_words(content) == [
+        CaptionWord(1.0, 'Did', speaker_change=True),
+        CaptionWord(1.4, 'you'),
+        CaptionWord(1.8, '&'),
+        CaptionWord(2.2, 'Kai'),
+        CaptionWord(2.6, 'go?'),
+        CaptionWord(4.0, 'Yes.'),
+    ]

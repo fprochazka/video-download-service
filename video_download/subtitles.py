@@ -1,6 +1,7 @@
 """Which subtitle tracks a job downloads: the video's own language and English, nothing of the machine translations"""
 
 import re
+from dataclasses import dataclass
 
 ENGLISH = 'en'
 
@@ -99,3 +100,72 @@ def vtt_cues(content: str) -> list[tuple[float, str]]:
             cues.append((start, text))
             last_line = text
     return cues
+
+
+VTT_CUE_RANGE_RE = re.compile(
+    r'^(?:(\d+):)?(\d{1,2}):(\d{2})[.,](\d{3})\s+-->\s+(?:(\d+):)?(\d{1,2}):(\d{2})[.,](\d{3})'
+)
+# YouTube's speech recognition captions time each word: word<00:00:01.320><c> word</c>
+VTT_WORD_TIME_RE = re.compile(r'<(?:(\d+):)?(\d{1,2}):(\d{2})[.,](\d{3})>')
+# A new speaker: >> in YouTube's captions, a leading dash in many manual subtitles
+SPEAKER_MARK_RE = re.compile(r'^(?:>>|[-–—]\s)\s*')
+
+
+@dataclass(frozen=True)
+class CaptionWord:
+    time: float
+    text: str
+    # The word starts a new speaker's turn
+    speaker_change: bool = False
+
+
+def vtt_seconds(hours, minutes, seconds, millis) -> float:
+    return int(hours or 0) * 3600 + int(minutes) * 60 + int(seconds) + int(millis) / 1000
+
+
+def unescape(text: str) -> str:
+    text = ' '.join(VTT_TAG_RE.sub('', text).replace('&nbsp;', ' ').split())
+    return text.replace('&amp;', '&').replace('&lt;', '<').replace('&gt;', '>')
+
+
+def vtt_words(content: str) -> list[CaptionWord]:
+    """Each word of a WebVTT file with the time it starts, sorted by it.
+
+    Words of YouTube's speech recognition captions carry their own time, and only their lines with word times count:
+    the other lines repeat the previous ones as the text rolls up. Words of other subtitles are spread evenly over
+    their cue.
+    """
+    timed = '<c>' in content
+    words: list[CaptionWord] = []
+    start = end = None
+    last_line = None
+    for raw_line in content.splitlines():
+        line = raw_line.strip()
+        if match := VTT_CUE_RANGE_RE.match(line):
+            start, end = vtt_seconds(*match.groups()[:4]), vtt_seconds(*match.groups()[4:])
+            continue
+        if not raw_line:
+            start = None
+            continue
+        # YouTube starts a cue with a line of one space where the rolled-up line would be
+        if not line or start is None or (timed and '<c>' not in line):
+            continue
+        parts = VTT_WORD_TIME_RE.split(line)
+        # parts: text, then (hours, minutes, seconds, millis, text) for each timed word
+        pieces = [(start, parts[0])] + [(vtt_seconds(*parts[i : i + 4]), parts[i + 4]) for i in range(1, len(parts), 5)]
+        texts = [(time, unescape(text)) for time, text in pieces]
+        plain = ' '.join(text for _, text in texts)
+        if not timed:
+            if plain == last_line:
+                continue
+            last_line = plain
+        speaker = bool(SPEAKER_MARK_RE.match(plain))
+        tokens = []
+        for time, text in texts:
+            text = SPEAKER_MARK_RE.sub('', text) if not tokens else text
+            tokens += [(time, token) for token in text.split()]
+        if not timed and tokens:
+            step = max(0.0, end - start) / len(tokens)
+            tokens = [(start + i * step, token) for i, (_, token) in enumerate(tokens)]
+        words += [CaptionWord(time, token, speaker and i == 0) for i, (time, token) in enumerate(tokens)]
+    return sorted(words, key=lambda word: word.time)

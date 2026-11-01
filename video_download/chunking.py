@@ -10,10 +10,13 @@ Chapter times are typed in by hand in whole seconds, so a chapter cut moves to t
 and snap_distance records how far it moved.
 """
 
+import bisect
 import difflib
 import math
 import re
 from dataclasses import dataclass, field
+
+from video_download.subtitles import CaptionWord
 
 CHUNKED_FROM_SECONDS = 7 * 60
 # On a 91-minute interview, Gemini 3.5 Flash-Lite stopped early, skipped passages or made up speech in 12 of 22 answers
@@ -61,6 +64,8 @@ class Cut:
     snap_distance: float | None = None
     # Length of the pause the cut lies in
     pause: float | None = None
+    # What the subtitles show at the cut: sentence, speaker, sentence+speaker, mid-sentence; None without subtitles
+    boundary: str | None = None
 
 
 @dataclass
@@ -115,22 +120,110 @@ def longest_pause(pauses, lo: float, hi: float, target: float, min_length: float
     return (best[1], best[2]) if best else None
 
 
-def find_cut(pauses, target: float, windows: list[tuple[float, float]], method: str) -> Cut:
-    """A cut in the longest pause of the first window that has one: of MIN_PAUSE_SECONDS in any window, then of any
+# Gemini tends to drop the words around a cut, least so at the end of a sentence or of a speaker's turn. The subtitles
+# show where those are; each property of a pause adds or takes points, the pause with the most wins.
+SENTENCE_POINTS = 2.0
+# A capitalized next word, for subtitles without punctuation; "I" is capitalized anywhere
+CAPITAL_POINTS = 1.0
+SPEAKER_POINTS = 2.0
+# Per second of pause, up to MAX_PAUSE_POINTS_SECONDS
+PAUSE_POINTS = 1.0
+MAX_PAUSE_POINTS_SECONDS = 2.0
+# The cut is less than MIN_LEAD_SECONDS before the next word starts, or a word starts inside the pause
+CLOSE_WORD_POINTS = -2.0
+MIN_LEAD_SECONDS = 0.5
+# Per second away from the chapter time or the time that makes the chunks equally long
+DISTANCE_POINTS_PER_SECOND = -1 / 15
+# Subtitle and speech detection times differ by this much
+CAPTION_SLACK_SECONDS = 0.3
+SENTENCE_END_RE = re.compile(r'[.?!…]["\'”’)\]]*$')
+# Subtitles whose words mostly start outside the detected speech belong to another edit of the video
+MIN_CAPTIONS_IN_SPEECH = 0.7
+
+
+class Captions:
+    """The words of the job's subtitles, to tell where sentences and speaker turns end"""
+
+    def __init__(self, words: list[CaptionWord]):
+        self.words = sorted(words, key=lambda word: word.time)
+        self.times = [word.time for word in self.words]
+
+    def aligned_with(self, speech: list[tuple[float, float]]) -> bool:
+        if not self.words:
+            return False
+        starts = [start for start, _ in speech]
+        inside = 0
+        for time in self.times:
+            index = bisect.bisect_right(starts, time + CAPTION_SLACK_SECONDS) - 1
+            inside += index >= 0 and time <= speech[index][1] + CAPTION_SLACK_SECONDS
+        return inside / len(self.times) >= MIN_CAPTIONS_IN_SPEECH
+
+    def boundary(self, start: float, end: float) -> tuple[float, str]:
+        """Points of a cut in the middle of the pause [start, end), and what the subtitles show there"""
+        middle = (start + end) / 2
+        following = bisect.bisect_left(self.times, middle - CAPTION_SLACK_SECONDS)
+        if following >= len(self.words):
+            return 0.0, 'end'
+        points = 0.0
+        labels = []
+        previous = self.words[following - 1] if following else None
+        word = self.words[following]
+        if previous is None or SENTENCE_END_RE.search(previous.text):
+            points += SENTENCE_POINTS
+            labels.append('sentence')
+        elif word.text[:1].isupper() and word.text != 'I' and not word.text.startswith("I'"):
+            points += CAPITAL_POINTS
+            labels.append('capital')
+        if word.speaker_change:
+            points += SPEAKER_POINTS
+            labels.append('speaker')
+        inside = bisect.bisect_left(self.times, start + CAPTION_SLACK_SECONDS) < bisect.bisect_right(
+            self.times, end - CAPTION_SLACK_SECONDS
+        )
+        if word.time - middle < MIN_LEAD_SECONDS or inside:
+            points += CLOSE_WORD_POINTS
+        return points, '+'.join(labels) or 'mid-sentence'
+
+
+def best_pause(pauses, lo, hi, target, min_length, captions: Captions | None):
+    """The middle, length and subtitle boundary of the best pause inside [lo, hi] of at least min_length: the longest
+    without subtitles, the one with the most points with them"""
+    if captions is None:
+        found = longest_pause(pauses, lo, hi, target, min_length)
+        return (*found, None) if found else None
+    best = None
+    for start, end in pauses:
+        start, end = max(start, lo), min(end, hi)
+        length = end - start
+        if length <= 0 or length < min_length:
+            continue
+        middle = (start + end) / 2
+        points, boundary = captions.boundary(start, end)
+        points += PAUSE_POINTS * min(length, MAX_PAUSE_POINTS_SECONDS)
+        points += DISTANCE_POINTS_PER_SECOND * abs(middle - target)
+        if best is None or points > best[0]:
+            best = (points, middle, length, boundary)
+    return best[1:] if best else None
+
+
+def find_cut(pauses, target: float, windows: list[tuple[float, float]], method: str, captions=None) -> Cut:
+    """A cut in the best pause of the first window that has one: of MIN_PAUSE_SECONDS in any window, then of any
     length in the widest; a hard cut at the target without one"""
     if pauses:
         stages = [(lo, hi, MIN_PAUSE_SECONDS) for lo, hi in windows] + [(*windows[-1], 0.05)]
         for lo, hi, min_length in stages:
             if hi < lo:
                 continue
-            found = longest_pause(pauses, lo, hi, target, min_length)
+            found = best_pause(pauses, lo, hi, target, min_length, captions)
             if found:
-                time, length = found
-                return Cut(round(time, 2), method, round(time - target, 2), round(length, 2))
+                time, length, boundary = found
+                return Cut(round(time, 2), method, round(time - target, 2), round(length, 2), boundary)
     return Cut(round(target, 2), HARD, 0.0, None)
 
 
-def split_range(pauses, start: float, end: float, first_cut: Cut, lengths: Lengths) -> list[tuple[float, float, Cut]]:
+def split_range(
+    pauses, start: float, end: float, first_cut: Cut, lengths: Lengths, captions: Captions | None = None
+) -> list[tuple[float, float, Cut]]:
     """[start, end) cut into chunks of at most the target length, about equally long, each cut in a pause"""
     pieces = []
     count = math.ceil((end - start) / lengths.target - 1e-9)
@@ -143,14 +236,16 @@ def split_range(pauses, start: float, end: float, first_cut: Cut, lengths: Lengt
             (max(lo_limit, target - width), min(hi_limit, target + width))
             for width in (SPLIT_SECONDS, SPLIT_WIDE_SECONDS)
         ]
-        next_cut = find_cut(pauses, target, windows, PAUSE)
+        next_cut = find_cut(pauses, target, windows, PAUSE, captions)
         pieces.append((position, next_cut.time, cut))
         position, cut = next_cut.time, next_cut
     pieces.append((position, end, cut))
     return pieces
 
 
-def snap_chapters(pauses, chapters: list[tuple[float, str]], duration: float) -> list[tuple[Cut, str]]:
+def snap_chapters(
+    pauses, chapters: list[tuple[float, str]], duration: float, captions: Captions | None = None
+) -> list[tuple[Cut, str]]:
     """Each chapter after the first with its time moved into a pause nearby; a chapter that would not come after the
     previous one is left out"""
     snapped = []
@@ -159,7 +254,7 @@ def snap_chapters(pauses, chapters: list[tuple[float, str]], duration: float) ->
         if time <= 0 or time >= duration:
             continue
         windows = [(time - width, time + width) for width in (SNAP_SECONDS, SNAP_WIDE_SECONDS)]
-        cut = find_cut(pauses, time, windows, CHAPTER)
+        cut = find_cut(pauses, time, windows, CHAPTER, captions)
         if cut.time <= previous or cut.time >= duration:
             continue
         snapped.append((cut, title))
@@ -172,14 +267,18 @@ def plan_chunks(
     speech: list[tuple[float, float]] | None,
     chapters: list[tuple[float, str]] | None = None,
     lengths: Lengths | None = None,
+    captions: list[CaptionWord] | None = None,
 ) -> Plan:
-    """speech: the speech regions of the audio, None when detection failed; chapters: (start, title) from info.json"""
+    """speech: the speech regions of the audio, None when detection failed; chapters: (start, title) from info.json;
+    captions: the words of the job's subtitles, ignored when they do not line up with the speech"""
     lengths = lengths or Lengths()
     chapters = [(float(time), title) for time, title in chapters or []]
     if duration < CHUNKED_FROM_SECONDS:
         return Plan([ChunkPlan(0, 0.0, duration, Cut(0.0, START), [title for _, title in chapters])], chapters)
     pauses = pauses_between(speech, duration)
-    snapped = snap_chapters(pauses, chapters, duration)
+    words = Captions(captions or [])
+    words = words if speech and words.aligned_with(speech) else None
+    snapped = snap_chapters(pauses, chapters, duration, words)
     # The headings stay at the chapter times: a cut moved away from a chapter only because there was no pause there
     marks = sorted(chapters)
 
@@ -205,7 +304,9 @@ def plan_chunks(
     pieces = []
     for start, end, cut in groups:
         pieces += (
-            split_range(pauses, start, end, cut, lengths) if end - start > lengths.maximum else [(start, end, cut)]
+            split_range(pauses, start, end, cut, lengths, words)
+            if end - start > lengths.maximum
+            else [(start, end, cut)]
         )
 
     chunks = []

@@ -2,6 +2,7 @@ import pytest
 
 from video_download import chunking
 from video_download.chunking import Lengths
+from video_download.subtitles import CaptionWord
 
 
 def speech_with_pauses(duration: float, pauses: list[tuple[float, float]]) -> list[tuple[float, float]]:
@@ -160,3 +161,56 @@ def test_most_repeated_line_ignores_short_lines():
 )
 def test_out_of_line_timestamps_are_repaired(starts, duration, repaired):
     assert chunking.repair_times(starts, duration) == repaired
+
+
+def caption_words(*words: tuple[float, str] | tuple[float, str, bool]) -> list[CaptionWord]:
+    return [CaptionWord(*word) for word in words]
+
+
+def test_with_subtitles_a_cut_goes_to_the_end_of_a_sentence_over_a_longer_pause_inside_one():
+    chapters = [(0, 'One'), (300, 'Two'), (600, 'Three')]
+    # At 296 a longer pause inside a sentence, at 305 a shorter one after a sentence and before a new speaker
+    pauses = [(295.0, 297.0), (304.6, 305.4), (599.5, 600.5)]
+    captions = caption_words(
+        (290.0, 'we'), (294.0, 'went'), (297.5, 'there.'), (305.9, 'Did', True), (306.5, 'you?'), (600.9, 'Next.')
+    )
+    speech = speech_with_pauses(900, pauses)
+
+    without = chunking.plan_chunks(900, speech, chapters)
+    plan = chunking.plan_chunks(900, speech, chapters, captions=captions)
+
+    assert without.chunks[1].start == 296.0
+    assert without.chunks[1].cut.boundary is None
+    assert plan.chunks[1].start == 305.0
+    assert plan.chunks[1].cut.boundary == 'sentence+speaker'
+
+
+@pytest.mark.parametrize(
+    ('pause', 'words', 'points', 'boundary'),
+    [
+        ((10.0, 11.0), [(9.0, 'done.'), (11.6, 'Then')], 2.0, 'sentence'),
+        ((10.0, 11.0), [(9.0, 'and'), (11.6, 'Kai')], 1.0, 'capital'),
+        ((10.0, 11.0), [(9.0, 'and'), (11.6, 'I')], 0.0, 'mid-sentence'),
+        # The next word starts too soon after the cut
+        ((10.0, 11.0), [(9.0, 'done.'), (10.8, 'Then')], 0.0, 'sentence'),
+        # The subtitles have a word inside the pause, the speech detection missed it
+        ((10.0, 13.0), [(9.0, 'done.'), (13.6, 'Then')], 0.0, 'sentence'),
+    ],
+)
+def test_points_of_a_pause_from_the_words_around_it(pause, words, points, boundary):
+    captions = chunking.Captions(caption_words(*words, (11.4, 'um') if pause == (10.0, 13.0) else (0.0, 'Hi.')))
+
+    assert captions.boundary(*pause) == (points, boundary)
+
+
+def test_subtitles_of_another_edit_of_the_video_are_ignored():
+    chapters = [(0, 'One'), (300, 'Two'), (600, 'Three')]
+    pauses = [(295.0, 297.0), (304.6, 305.4), (599.5, 600.5)]
+    speech = speech_with_pauses(900, pauses)
+    # Every word sits in one of the pauses: the subtitles are timed for something else
+    captions = caption_words((296.0, 'done.'), (305.0, 'Did', True), (600.0, 'Next.'))
+
+    plan = chunking.plan_chunks(900, speech, chapters, captions=captions)
+
+    assert plan.chunks[1].start == 296.0
+    assert plan.chunks[1].cut.boundary is None
