@@ -1,5 +1,8 @@
+import asyncio
 import io
 import json
+import sys
+import types
 import uuid
 from pathlib import Path
 
@@ -17,7 +20,7 @@ from tests.ytdlp_fakes import (
     read_metadata,
     write_media,
 )
-from video_download import config, errors, storage, urls, web, ytdlp
+from video_download import attempts, config, errors, jobs, storage, urls, web, ytdlp
 
 VIDEO_URL = 'https://www.youtube.com/watch?v=dQw4w9WgXcQ'
 PLAYLIST_REJECTED = (
@@ -521,9 +524,12 @@ def test_youtube_needs_auth_is_retried_with_youtube_cookies(client, downloads_di
     assert isinstance(second.opts['cookiefile'], io.StringIO)
     assert cookies_file.read_text() == YOUTUBE_COOKIES
     assert any(
-        download_id in r.getMessage() and 'retrying with YouTube cookies' in r.getMessage() for r in caplog.records
+        download_id in r.getMessage() and 'failed with needs_auth, trying youtube cookies' in r.getMessage()
+        for r in caplog.records
     )
-    assert 'retrying with YouTube cookies' in (downloads_dir / download_id / 'download.log').read_text()
+    assert (
+        'failed with needs_auth, trying youtube cookies' in (downloads_dir / download_id / 'download.log').read_text()
+    )
     assert client.get(f'/status/{download_id}').json()['used_youtube_cookies'] is True
 
 
@@ -774,9 +780,9 @@ def test_failed_media_keeps_the_subtitles_and_details(client, downloads_dir, cap
         ('Czech_Video-abc.en.vtt', 'subtitle'),
         ('info.json', 'info'),
     ]
-    # The subtitles come from the extraction of the failed run, nothing is extracted again
-    first, subtitles_run = FakeYoutubeDL.instances
-    assert first.calls == [(VIDEO_URL, False)]
+    # The subtitles come from the extraction of the last failed run, nothing is extracted again
+    *runs, subtitles_run = FakeYoutubeDL.instances
+    assert [r.calls for r in runs] == [[(VIDEO_URL, False)]] * len(metadata['attempts'])
     assert subtitles_run.calls == []
     assert [p.get('skip_download') for p in subtitles_run.processed] == [True]
     assert any(download_id in r.getMessage() and 'HTTP Error 403' in r.getMessage() for r in caplog.records)
@@ -983,3 +989,295 @@ def test_delete_needs_the_csrf_token(client, downloads_dir):
 
 def test_delete_of_unknown_job(client):
     assert client.delete('/downloads/00000000-0000-0000-0000-000000000000/x.mp4').status_code == 404
+
+
+CONFIGURED_FORMAT = 'bv*[protocol^=http]+ba[protocol^=http]/b[protocol^=http]'
+
+
+def player_client(opts) -> list[str] | None:
+    return opts['extractor_args'].get('youtube', {}).get('player_client')
+
+
+@pytest.fixture
+def user_config(monkeypatch):
+    """extractor_config.py with youtube args and an HLS-free format, as a deployment may have it"""
+    extractor_args = {'youtube': {'lang': ['en']}}
+    user_opts = {'format': CONFIGURED_FORMAT}
+    monkeypatch.setattr(config, 'load_user_config', lambda: (extractor_args, user_opts))
+    return extractor_args, user_opts
+
+
+def test_refused_media_is_tried_with_another_player_client(client, downloads_dir, user_config, caplog):
+    def download(ydl, info):
+        if player_client(ydl.params) != ['visionos']:
+            media_refused()
+
+    FakeYoutubeDL.behaviour = youtube_video
+    FakeYoutubeDL.download_behaviour = download
+    FakeYoutubeDL.subtitles_behaviour = write_requested_subtitles
+
+    download_id = client.post('/download', data={'url': VIDEO_URL}).json()['download_id']
+
+    metadata = read_metadata(downloads_dir, download_id)
+    assert metadata['status'] == 'completed'
+    assert metadata['files'] == ['Czech_Video-abc.mp4']
+    assert metadata['error'] is None
+    first, second = metadata['attempts']
+    assert (first['attempt'], first['changes'], first['error_code'], first['error_phase']) == (
+        1,
+        [],
+        'forbidden',
+        'media',
+    )
+    assert (second['attempt'], second['changes'], second['error_code']) == (2, ['player_client visionos'], None)
+    assert second['retry'] is False
+    initial, fallback = FakeYoutubeDL.instances
+    assert player_client(initial.opts) is None
+    assert fallback.opts['extractor_args']['youtube'] == {'lang': ['en'], 'player_client': ['visionos']}
+    assert fallback.opts['format'] == CONFIGURED_FORMAT
+    # The module-level config that concurrent jobs share is never changed
+    assert user_config == ({'youtube': {'lang': ['en']}}, {'format': CONFIGURED_FORMAT})
+    assert any(
+        'attempt 1 failed with forbidden, trying player_client visionos' in r.getMessage() for r in caplog.records
+    )
+    assert 'Attempt 1 failed with forbidden' in (downloads_dir / download_id / 'download.log').read_text()
+
+    status = client.get(f'/status/{download_id}').json()
+    assert [a['changes'] for a in status['attempts']] == [[], ['player_client visionos']]
+
+
+def test_refused_media_fails_after_every_fallback_and_keeps_the_subtitles(client, downloads_dir, user_config):
+    FakeYoutubeDL.behaviour = youtube_video
+    FakeYoutubeDL.download_behaviour = refuse_media
+    FakeYoutubeDL.subtitles_behaviour = write_requested_subtitles
+
+    download_id = client.post('/download', data={'url': VIDEO_URL}).json()['download_id']
+
+    metadata = read_metadata(downloads_dir, download_id)
+    assert metadata['status'] == 'failed'
+    assert (metadata['error_code'], metadata['error_phase']) == ('forbidden', 'media')
+    assert [a['changes'] for a in metadata['attempts']] == [
+        [],
+        ['player_client visionos'],
+        ['player_client tv'],
+        ['player_client web_embedded'],
+        ['format bv*+ba/b'],
+    ]
+    assert {a['error_code'] for a in metadata['attempts']} == {'forbidden'}
+    *runs, subtitles_run = FakeYoutubeDL.instances
+    assert [(player_client(r.opts), r.opts['format']) for r in runs] == [
+        (None, CONFIGURED_FORMAT),
+        (['visionos'], CONFIGURED_FORMAT),
+        (['tv'], CONFIGURED_FORMAT),
+        (['web_embedded'], CONFIGURED_FORMAT),
+        (None, 'bv*+ba/b'),
+    ]
+    # The subtitles are fetched once, from the last extraction
+    assert subtitles_run.calls == []
+    assert subtitles_run.opts['format'] == 'bv*+ba/b'
+    assert [a['kind'] for a in metadata['artifacts']] == ['subtitle', 'subtitle', 'info']
+
+
+def page_needs_reload():
+    raise_like_ytdlp(
+        ExtractorError('The page needs to be reloaded.', expected=True, ie='youtube', video_id='dQw4w9WgXcQ')
+    )
+
+
+def test_fallback_client_that_fails_its_extraction_moves_on_to_the_next_fallback(client, downloads_dir):
+    def behaviour(opts, url):
+        if player_client(opts) == ['tv']:
+            page_needs_reload()
+        return youtube_video(opts, url)
+
+    def download(ydl, info):
+        if player_client(ydl.params) != ['web_embedded']:
+            media_refused()
+
+    FakeYoutubeDL.behaviour = behaviour
+    FakeYoutubeDL.download_behaviour = download
+
+    download_id = client.post('/download', data={'url': VIDEO_URL}).json()['download_id']
+
+    metadata = read_metadata(downloads_dir, download_id)
+    assert metadata['status'] == 'completed'
+    assert [(a['changes'], a['error_code'], a['error_phase']) for a in metadata['attempts']] == [
+        ([], 'forbidden', 'media'),
+        (['player_client visionos'], 'forbidden', 'media'),
+        (['player_client tv'], 'unknown', 'extraction'),
+        (['player_client web_embedded'], None, None),
+    ]
+
+
+def test_failed_fallbacks_report_the_failure_that_started_them(client, downloads_dir):
+    def behaviour(opts, url):
+        if player_client(opts) == ['web_embedded']:
+            page_needs_reload()
+        return youtube_video(opts, url)
+
+    FakeYoutubeDL.behaviour = behaviour
+    FakeYoutubeDL.download_behaviour = refuse_media
+    FakeYoutubeDL.subtitles_behaviour = write_requested_subtitles
+
+    download_id = client.post('/download', data={'url': VIDEO_URL}).json()['download_id']
+
+    metadata = read_metadata(downloads_dir, download_id)
+    assert metadata['status'] == 'failed'
+    assert metadata['error'] == 'unable to download video data: HTTP Error 403: Forbidden'
+    assert (metadata['error_code'], metadata['error_type'], metadata['error_phase']) == (
+        'forbidden',
+        'HTTPError',
+        'media',
+    )
+    assert [a['error_code'] for a in metadata['attempts']] == ['forbidden', 'forbidden', 'forbidden', 'unknown']
+    assert metadata['attempts'][-1]['error'] == '[youtube] dQw4w9WgXcQ: The page needs to be reloaded.'
+    # The subtitles and details come from the last extraction that worked, of the tv attempt
+    assert [a['kind'] for a in metadata['artifacts']] == ['subtitle', 'subtitle', 'info']
+    assert player_client(FakeYoutubeDL.instances[-1].opts) == ['tv']
+
+
+def test_rate_limit_of_a_fallback_ends_the_fallbacks(client, downloads_dir):
+    def behaviour(opts, url):
+        if player_client(opts) == ['visionos']:
+            rate_limited()
+        return youtube_video(opts, url)
+
+    FakeYoutubeDL.behaviour = behaviour
+    FakeYoutubeDL.download_behaviour = refuse_media
+
+    download_id = client.post('/download', data={'url': VIDEO_URL}).json()['download_id']
+
+    metadata = read_metadata(downloads_dir, download_id)
+    assert metadata['error_code'] == 'rate_limited'
+    assert [a['error_code'] for a in metadata['attempts']] == ['forbidden', 'rate_limited']
+
+
+def test_fallback_clients_come_from_the_config_and_skip_the_configured_client(client, downloads_dir, monkeypatch):
+    monkeypatch.setattr(config, 'load_user_config', lambda: ({'youtube': {'player_client': ['tv']}}, {}))
+    monkeypatch.setattr(config, 'youtube_fallback_clients', lambda: ['tv', 'ios'])
+    FakeYoutubeDL.behaviour = lambda opts, url: no_formats()
+
+    download_id = client.post('/download', data={'url': VIDEO_URL}).json()['download_id']
+
+    metadata = read_metadata(downloads_dir, download_id)
+    assert metadata['error_code'] == 'no_formats'
+    # The default format is already the broad one, so no format attempt follows
+    assert [a['changes'] for a in metadata['attempts']] == [[], ['player_client ios']]
+    assert [player_client(r.opts) for r in FakeYoutubeDL.instances] == [['tv'], ['ios']]
+
+
+def test_unavailable_format_on_another_site_is_tried_with_the_broad_format(client, downloads_dir, user_config):
+    def behaviour(opts, url):
+        if opts['format'] != 'bv*+ba/b':
+            format_unavailable()
+        return {'id': 'x', 'requested_downloads': [{'filepath': write_media(opts, 'clip-x.mp4')}]}
+
+    FakeYoutubeDL.behaviour = behaviour
+
+    download_id = client.post('/download', data={'url': 'https://vimeo.com/123456789'}).json()['download_id']
+
+    metadata = read_metadata(downloads_dir, download_id)
+    assert metadata['status'] == 'completed'
+    assert [(a['changes'], a['error_code']) for a in metadata['attempts']] == [
+        ([], 'format_unavailable'),
+        (['format bv*+ba/b'], None),
+    ]
+    assert 'used_youtube_cookies' not in metadata
+
+
+def test_transient_failure_is_tried_again_once_after_a_pause(client, downloads_dir, monkeypatch):
+    pauses = []
+
+    async def sleep(seconds):
+        pauses.append(seconds)
+
+    monkeypatch.setenv('DOWNLOAD_RETRY_PAUSE_SECONDS', '12.5')
+    monkeypatch.setattr(attempts.asyncio, 'sleep', sleep)
+    failures = iter([True])
+
+    def download(ydl, info):
+        if next(failures, False):
+            media_refused(503, 'Service Unavailable')
+
+    FakeYoutubeDL.behaviour = youtube_video
+    FakeYoutubeDL.download_behaviour = download
+
+    download_id = client.post('/download', data={'url': VIDEO_URL}).json()['download_id']
+
+    metadata = read_metadata(downloads_dir, download_id)
+    assert metadata['status'] == 'completed'
+    assert [(a['changes'], a['retry'], a['error_code']) for a in metadata['attempts']] == [
+        ([], False, 'network'),
+        ([], True, None),
+    ]
+    assert pauses == [12.5]
+    first, second = FakeYoutubeDL.instances
+    # The params of the media pass; the subtitles pass of the second run changes its params afterwards
+    assert first.processed[0] == second.processed[0]
+
+
+def test_second_transient_failure_ends_the_job(client, downloads_dir):
+    FakeYoutubeDL.behaviour = lambda opts, url: network_down()
+
+    download_id = client.post('/download', data={'url': 'https://www.instagram.com/p/ABC123/'}).json()['download_id']
+
+    metadata = read_metadata(downloads_dir, download_id)
+    assert metadata['status'] == 'failed'
+    assert (metadata['error_code'], metadata['error_phase']) == ('network', 'extraction')
+    assert [a['retry'] for a in metadata['attempts']] == [False, True]
+
+
+def test_instagram_transient_failure_is_tried_again_with_its_cookies(client, downloads_dir, instagram_cookies):
+    failures = iter([True])
+
+    def behaviour(opts, url):
+        if next(failures, False):
+            network_down()
+        return {'id': 'ABC123', 'requested_downloads': [{'filepath': write_media(opts, 'Post-ABC123.mp4')}]}
+
+    FakeYoutubeDL.behaviour = behaviour
+
+    download_id = client.post('/download', data={'url': 'https://www.instagram.com/p/ABC123/'}).json()['download_id']
+
+    assert read_metadata(downloads_dir, download_id)['status'] == 'completed'
+    assert [ydl.opts['cookiefile'] for ydl in FakeYoutubeDL.instances] == ['instagram_cookies.txt'] * 2
+
+
+@pytest.mark.parametrize('raiser', [rate_limited, age_gated, postprocessing_failed, crashed])
+def test_failure_that_another_attempt_cannot_fix_ends_the_job_at_once(client, downloads_dir, raiser):
+    FakeYoutubeDL.behaviour = lambda opts, url: raiser()
+
+    download_id = client.post('/download', data={'url': VIDEO_URL}).json()['download_id']
+
+    assert len(read_metadata(downloads_dir, download_id)['attempts']) == 1
+    assert len(FakeYoutubeDL.instances) == 1
+
+
+@pytest.mark.anyio
+async def test_no_attempt_starts_after_the_job_is_cancelled(downloads_dir, monkeypatch):
+    monkeypatch.setenv('DOWNLOAD_RETRY_PAUSE_SECONDS', '60')
+    FakeYoutubeDL.behaviour = lambda opts, url: network_down()
+    metadata = jobs.create_job(VIDEO_URL, VIDEO_URL, 'Youtube')
+    download_id = metadata['download_id']
+    task = asyncio.create_task(jobs.download_video_task(download_id, VIDEO_URL))
+    for _ in range(500):
+        await asyncio.sleep(0.01)
+        if read_metadata(downloads_dir, download_id).get('attempts'):
+            break
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    metadata = read_metadata(downloads_dir, download_id)
+    assert metadata['status'] == 'failed'
+    assert metadata['error_code'] == 'interrupted'
+    assert len(metadata['attempts']) == 1
+    assert len(FakeYoutubeDL.instances) == 1
+
+
+def test_youtube_fallback_clients_of_extractor_config(monkeypatch):
+    monkeypatch.setitem(sys.modules, 'extractor_config', types.SimpleNamespace(YOUTUBE_FALLBACK_CLIENTS='tv'))
+    assert config.youtube_fallback_clients() == ['tv']
+    monkeypatch.setitem(sys.modules, 'extractor_config', types.SimpleNamespace())
+    assert config.youtube_fallback_clients() == ['visionos', 'tv', 'web_embedded']

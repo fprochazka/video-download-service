@@ -1,14 +1,13 @@
 """Download jobs: creating one, running it in the background, and failing the ones a restart interrupted"""
 
 import asyncio
-import io
 import logging
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
-from video_download import config, download_index, storage
-from video_download.errors import classify_error, is_needs_auth
+from video_download import attempts, config, download_index, storage
+from video_download.errors import classify_error, classify_error_safely
 from video_download.progress import DownloadProgress
 from video_download.storage import (
     ACTIVE_STATUSES,
@@ -26,15 +25,11 @@ from video_download.urls import resolve_download_url, video_key
 from video_download.worker import DOWNLOAD, JobWorker
 from video_download.ytdlp import (
     DownloadResult,
-    build_ydl_opts,
     cleanup_ytdlp_logger,
     collect_downloaded_files,
     collect_subtitle_files,
     extract_video_metadata,
     fetch_subtitles,
-    is_instagram_extractor,
-    is_youtube_extractor,
-    run_ytdlp,
     setup_ytdlp_logger,
 )
 
@@ -97,26 +92,6 @@ def submit_download(worker: JobWorker, url: str, force: bool = False) -> Submiss
     return Submission(metadata['download_id'], existing=False)
 
 
-async def download_youtube(
-    download_id: str, download_dir: Path, download_url: str, ytdlp_logger: logging.Logger, progress: DownloadProgress
-) -> DownloadResult:
-    """First attempt without cookies, one retry with the YouTube cookies file when YouTube asks for a login"""
-    update_metadata(download_dir, used_youtube_cookies=False)
-    ydl_opts = build_ydl_opts(download_dir, ytdlp_logger)
-    result = await asyncio.to_thread(run_ytdlp, ydl_opts, download_url, progress)
-    cookies_file = config.youtube_cookies_file() if result.error is not None else None
-    if cookies_file is None or not is_needs_auth(result.error):
-        return result
-
-    logger.info('Download %s needs a YouTube login, retrying with YouTube cookies from %s', download_id, cookies_file)
-    ytdlp_logger.info('YouTube asked for a login, retrying with YouTube cookies from %s', cookies_file)
-    update_metadata(download_dir, used_youtube_cookies=True)
-    retry_opts = build_ydl_opts(download_dir, ytdlp_logger)
-    # A text stream instead of the path, so yt-dlp never writes the cookies back to the file
-    retry_opts['cookiefile'] = io.StringIO(cookies_file.read_text(encoding='utf-8'))
-    return await asyncio.to_thread(run_ytdlp, retry_opts, download_url, progress)
-
-
 def subtitle_artifacts(download_dir: Path, result: DownloadResult) -> list[dict]:
     tracks = result.subtitle_tracks or {}
     return [
@@ -156,16 +131,7 @@ def mark_failed(download_dir: Path, download_id: str, error: dict, extractor: st
 
 def classify(download_id: str, exc: Exception, phase: str | None = None) -> dict:
     logger.debug('Download %s raised', download_id, exc_info=exc)
-    try:
-        return classify_error(exc, phase)
-    except Exception:
-        logger.exception('Could not classify the failure of download %s', download_id)
-        return {
-            'error': str(exc) or type(exc).__name__,
-            'error_code': 'unknown',
-            'error_type': type(exc).__name__,
-            'error_phase': phase,
-        }
+    return classify_error_safely(exc, phase)
 
 
 async def download_video_task(download_id: str, url: str):
@@ -180,13 +146,9 @@ async def download_video_task(download_id: str, url: str):
         download_url = metadata.get('download_url') or url
 
         ytdlp_logger = setup_ytdlp_logger(download_id, download_dir)
-        if is_youtube_extractor(extractor):
-            result = await download_youtube(download_id, download_dir, download_url, ytdlp_logger, progress)
-        else:
-            ydl_opts = build_ydl_opts(download_dir, ytdlp_logger, instagram_cookies=is_instagram_extractor(extractor))
-            result = await asyncio.to_thread(run_ytdlp, ydl_opts, download_url, progress)
+        result = await attempts.download(download_id, download_dir, download_url, extractor, ytdlp_logger, progress)
         if result.error is not None:
-            # The media failed, but the extraction has the details and the subtitles, which the job keeps
+            # The media failed, but the last extraction has the details and the subtitles, which the job keeps
             await asyncio.to_thread(fetch_subtitles, result, progress)
         progress.close()
 

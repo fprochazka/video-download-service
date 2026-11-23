@@ -732,6 +732,18 @@
                 + '</div></div>';
         }
 
+        // Each yt-dlp run of a failed job: 1. the configured options: forbidden; 2. player_client tv: forbidden
+        function renderAttempts(status) {
+            const attempts = status.attempts || [];
+            if (attempts.length < 2) return '';
+            const items = attempts.map(attempt => {
+                let changes = (attempt.changes || []).join(', ') || 'the configured options';
+                if (attempt.retry) changes += ', again after a transient failure';
+                return `${attempt.attempt}. ${changes}: ${attempt.error_code || 'downloaded'}`;
+            });
+            return `<br><small class="attempts">Tried ${attempts.length} times: ${escapeHtml(items.join('; '))}</small>`;
+        }
+
         // The video details from the extraction, also of a failed job whose media did not download
         function renderVideoInfo(status, finishedLabel) {
             let html = '<div class="metadata">';
@@ -942,6 +954,7 @@
                     if (hint) {
                         errorHtml += `<br><small>${escapeHtml(hint)}</small>`;
                     }
+                    errorHtml += renderAttempts(status);
                     // The media failed, but the subtitles and details the extraction found are kept
                     if ((status.artifacts || []).length > 0 || (status.deleted_files || []).length > 0) {
                         errorHtml += renderFiles(status);

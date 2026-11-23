@@ -94,6 +94,14 @@ class DownloadProgress:
         self.parts = format_parts(info)
         self.write(video_details(info, tracks))
 
+    def start_attempt(self):
+        """Forget the progress of a failed attempt, the next one extracts and downloads again from the start"""
+        self.phase = DOWNLOADING
+        self.parts = []
+        self.last_key = None
+        self.last_write = None
+        self.guard(self.write, {'progress': None})
+
     def start_subtitles(self):
         self.phase = SUBTITLES
 

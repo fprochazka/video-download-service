@@ -24,7 +24,7 @@ from mcp_types import ToolAnnotations
 from pydantic import BaseModel, Field
 
 from video_download import config, jobs, pricing, transcription
-from video_download.status import ExpectedSubtitle, Progress, ProviderReport, status_response
+from video_download.status import DownloadAttempt, ExpectedSubtitle, Progress, ProviderReport, status_response
 from video_download.storage import LOG_FILENAME, TRANSCRIPT, load_metadata
 from video_download.urls import InvalidDownloadUrl
 from video_download.worker import JobWorker
@@ -300,6 +300,9 @@ class Job(BaseModel):
     error_phase: str | None = Field(
         None, description='the step that failed: extraction (reading the video page), media or postprocessing'
     )
+    attempts: list[DownloadAttempt] = Field(
+        [], description='each yt-dlp run of the download, with what it changed and how it failed; the last one counts'
+    )
     transcription_available: bool
     files: list[JobFile]
     transcriptions: dict[str, JobTranscription] = Field(description='by media file name')
@@ -390,6 +393,7 @@ def job_summary(download_dir: Path, metadata: dict, base_url: str | None, existi
         error=status.error,
         error_code=status.error_code,
         error_phase=status.error_phase,
+        attempts=status.attempts,
         transcription_available=status.transcription_available,
         files=files,
         transcriptions=transcriptions,
@@ -418,6 +422,13 @@ def summary_text(summary: dict) -> str:
             f'The link was already downloaded in this job, created {summary["created_at"]}; nothing new was '
             'downloaded. Call download_video with force=true to download it again.'
         )
+    if len(summary['attempts']) > 1:
+        lines.append('Attempts:')
+        for attempt in summary['attempts']:
+            changes = ', '.join(attempt['changes']) or 'the configured options'
+            if attempt['retry']:
+                changes += ', again after a transient failure'
+            lines.append(f'- {attempt["attempt"]} ({changes}): {attempt["error_code"] or "downloaded"}')
     if summary['files']:
         lines.append('Files:')
         for file in summary['files']:

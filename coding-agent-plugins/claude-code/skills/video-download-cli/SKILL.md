@@ -30,7 +30,7 @@ The CLI reads the service's base URL from `VIDEO_DOWNLOAD_URL` (for example `htt
    ```bash
    video-download get-job --download-id <download_id> --wait-seconds 60
    ```
-   A failed job has `error` and `error_code`; report them to the user. Do not start the same download again unless the error says it may help. When only the media failed, the job still lists the subtitle files and `info.json` in `files`, so you can read the subtitles without the video.
+   A failed job has `error` and `error_code`; report them to the user. The service already retries transient failures and tries other options after a refused media file; `attempts` lists what it tried. Do not start the same download again unless the error says it may help. When only the media failed, the job still lists the subtitle files and `info.json` in `files`, so you can read the subtitles without the video.
 3. Read the result. `files` lists every file of the job with its `kind` (`media`, `subtitle`, `info`, `transcript`), `size` and a plain HTTP `url`. The URLs need no authentication. Subtitle files also have `lang` (`en`, `cs-orig`, ...) and `auto_captions`. The video details (title, uploader, duration, chapters) are in the job itself and in `info.json`.
 4. Read the subtitles by downloading their URL:
    ```bash

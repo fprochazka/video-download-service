@@ -16,6 +16,7 @@ A simple web service for downloading videos from various platforms using yt-dlp 
 - **File list with delete** - The job page lists the files grouped as media, subtitles and details, with their size, a download link and a delete button. Deleted files stay listed as deleted, with the date
 - **Single videos only** - Links to playlists, channels, profiles, albums and other collections are rejected, even when the collection holds one video. The service asks yt-dlp whether the link's extractor returns only collections, so this works on every site yt-dlp supports. A single post with several videos, like an Instagram carousel, is not a collection and downloads all its items. A YouTube link to a video inside a playlist or mix downloads just that video
 - **Error handling** - Failed downloads are tracked in metadata with the error message and a machine-readable `error_code`, and logged to the service log
+- **Retries and fallbacks** - A download that failed with a server error, a dropped connection or a timeout is tried once more after a pause. A refused media file or a missing format is tried with other YouTube player clients and a broader format. Every attempt is listed in the job, see [Attempts](#attempts)
 - **Download status states**:
   - `pending` - Download queued
   - `downloading` - Video being downloaded
@@ -64,7 +65,7 @@ The downloads directory defaults to `downloads` in the working directory and can
 
 The service checks every setting of its environment at startup. A value it cannot use, such as `DOWNLOAD_CONCURRENCY=two`, `GC_ENABLED=maybe`, a `PUBLIC_BASE_URL` that is not an absolute http(s) URL, or a `TRANSCRIPTION_PRICES` that is not valid JSON, stops the startup with one log line that names the variable and the value it expects. An unset or empty variable takes its default. The message never contains an API key.
 
-Downloads run in an in-process worker, at most `DOWNLOAD_CONCURRENCY` (default `2`) at the same time; further jobs wait as `pending`. Transcriptions have their own queue, limited by `TRANSCRIPTION_CONCURRENCY` (default `2`); the chunks of a long recording run `TRANSCRIPTION_CHUNK_CONCURRENCY` (default `4`) at a time within one transcription. The queue lives in memory: jobs still queued or running when the service stops are marked `interrupted` on the next start.
+Downloads run in an in-process worker, at most `DOWNLOAD_CONCURRENCY` (default `2`) at the same time; further jobs wait as `pending`. A download that failed with a transient error waits `DOWNLOAD_RETRY_PAUSE_SECONDS` (default `15`) before its next attempt, and keeps its worker slot while it waits. Transcriptions have their own queue, limited by `TRANSCRIPTION_CONCURRENCY` (default `2`); the chunks of a long recording run `TRANSCRIPTION_CHUNK_CONCURRENCY` (default `4`) at a time within one transcription. The queue lives in memory: jobs still queued or running when the service stops are marked `interrupted` on the next start.
 
 Measured results of the transcription experiments, and the research behind the design, are in `docs/` at the repository root: [models](../docs/transcription-models.md), [chunking](../docs/transcription-chunking.md) and [research notes](../docs/research.md). Add a new experiment's findings there, with its date and test recordings.
 
@@ -282,10 +283,10 @@ The compose file does not have this line by default: if the source file is missi
 
 How the service uses the file:
 
-- It reads the file at the start of each retry, so you do not have to restart the service after you add or replace it.
-- It sends the cookies only on one retry, after the first attempt of a YouTube job failed with `needs_auth`. If the retry also fails, the job shows the error of the retry.
+- It reads the file when a job needs it, so you do not have to restart the service after you add or replace it.
+- It sends the cookies on one [attempt](#attempts) of a YouTube job only, the attempt after one that failed with `needs_auth`. That attempt uses the configured options with the cookies. If it fails too, the job shows its error, or goes on with the next attempt the failure allows.
 - It never writes the file back. yt-dlp gets the cookies as an in-memory copy.
-- The job's `metadata.json` records `used_youtube_cookies: true` when the retry ran.
+- The job's `metadata.json` records `used_youtube_cookies: true` when the attempt with the cookies ran.
 
 If `download.log` of the job contains `The provided YouTube account cookies are no longer valid`, YouTube rotated the cookies. Export them again with the steps above.
 
@@ -322,7 +323,22 @@ The configuration file is automatically loaded if present. This allows you to fi
 
 **Note:** `extractor_config.py` is gitignored to keep your customizations private.
 
-Some options are owned by the service and always override `YTDLP_OPTS`: `ignoreerrors` (always off, so failures are reported as failures), `noplaylist`, `restrictfilenames`, `paths`, `outtmpl` and `logger`. The default `format` (`bv*+ba/b`) and `merge_output_format` (`mp4`) can be overridden.
+Some options are owned by the service and always override `YTDLP_OPTS`: `ignoreerrors` (always off, so failures are reported as failures), `noplaylist`, `restrictfilenames`, `paths`, `outtmpl` and `logger`. The default `format` (`bv*+ba/b`) and `merge_output_format` (`mp4`) can be overridden. A configured `format` holds for every attempt but the last fallback, which replaces it with `bv*+ba/b`, see [Attempts](#attempts).
+
+`YOUTUBE_FALLBACK_CLIENTS` in `extractor_config.py` replaces the list of YouTube player clients the fallback attempts try, `['visionos', 'tv', 'web_embedded']` by default; `[]` tries none. A `player_client` in `EXTRACTOR_ARGS['youtube']` holds for the first attempt, and a fallback client equal to it is skipped.
+
+### Attempts
+
+yt-dlp does not retry a refused request (HTTP 4xx), and it cannot try another YouTube player client on its own. A job therefore runs a list of attempts, each a new yt-dlp run that extracts the video again, and stops at the first one that downloads the media:
+
+1. The first attempt uses the configured options.
+2. After a server error, a dropped connection or a timeout (`network`), the same options run once more after `DOWNLOAD_RETRY_PAUSE_SECONDS`.
+3. After `forbidden`, `no_formats` or `format_unavailable`, a YouTube job tries the player clients of `YOUTUBE_FALLBACK_CLIENTS` one at a time, with the configured format. The last fallback, on every site, replaces the configured format with `bv*+ba/b`, which allows HLS; on YouTube HLS needs no PO token. It is skipped when the configured format is `bv*+ba/b` already.
+4. After `needs_auth` on YouTube, one attempt with `youtube_cookies.txt`, if the file is there, see [YouTube login](#youtube-login-optional-not-enabled-by-default).
+
+Any other failure, such as `rate_limited`, `unavailable`, `geo_restricted` or `postprocessing`, ends the job at once. Once the fallbacks of step 3 run, a fallback that fails for another reason moves on to the next one, because one player client can fail its own extraction, as `tv` did with `The page needs to be reloaded.`; only `rate_limited` ends them early. When the fallbacks run out, the job's error is the failure that started them, such as the `forbidden` of the attempt before them, because it says why the media failed; a fallback that ends the list with `rate_limited` is the job's error instead, because it says when to try again. Otherwise the job's error is the error of its last attempt. `attempts` lists the error of every attempt. Each attempt holds the worker slot and sends the site its requests again from the same address, so a job that cannot succeed takes a few minutes longer to fail. When YouTube blocks the server's address, every client gets the same 403, and only the subtitles and details are saved.
+
+Each attempt is a line in `download.log` and in the service log, and an entry of `attempts` in `metadata.json`, see [Metadata Structure](#metadata-structure). The page lists the attempts of a failed job. The media files of a failed attempt that yt-dlp completed before the failure, such as the video part of a video and audio pair, stay in the job directory, unlisted.
 
 ### Transcription
 
@@ -561,6 +577,7 @@ service/
 │   ├── mcp_tasks.py     # MCP tasks of download_video, read from metadata.json
 │   ├── status.py        # The job status the API and the MCP tools return
 │   ├── jobs.py          # Job creation, the download task, the startup sweep
+│   ├── attempts.py      # The attempts of a download: retries and fallbacks chosen by the failure
 │   ├── worker.py        # In-process job queues with a concurrency limit per lane
 │   ├── transcription.py # Transcription pipeline: prompt, answer parsing, checks, chunks, transcript files
 │   ├── chunking.py      # Where a long recording is cut, and the measures that validate a chunk
@@ -675,6 +692,10 @@ Each download creates a `metadata.json` file with:
   "error_code": null,
   "error_type": null,
   "error_phase": null,
+  "attempts": [
+    {"attempt": 1, "changes": [], "retry": false, "started_at": "2025-01-14T12:00:01+00:00", "ended_at": "2025-01-14T12:00:09+00:00", "error": "unable to download video data: HTTP Error 403: Forbidden", "error_code": "forbidden", "error_type": "HTTPError", "error_phase": "media"},
+    {"attempt": 2, "changes": ["player_client visionos"], "retry": false, "started_at": "2025-01-14T12:00:09+00:00", "ended_at": "2025-01-14T12:05:00+00:00", "error": null, "error_code": null, "error_type": null, "error_phase": null}
+  ],
   "created_at": "2025-01-14T12:00:00",
   "updated_at": "2025-01-14T12:05:00",
   "completed_at": "2025-01-14T12:05:00",
@@ -733,9 +754,11 @@ The video details (`title` to `resolution`, `filesize_approx`, `chapters_count` 
 
 `transcription_id` and `trace_id` identify the request to ElevenLabs support. A header that is missing or not a number is left out. The `.transcript.json` has the same `cost` and `provider_report`.
 
-YouTube jobs also carry `used_youtube_cookies` (`true` when the retry with `youtube_cookies.txt` ran).
+`attempts` lists every yt-dlp run of the job, see [Attempts](#attempts). `changes` says what the attempt changed in the configured options (`player_client visionos`, `format bv*+ba/b`, `youtube cookies`), `retry` is `true` for the same options again after a transient failure, and the error fields are those of the attempt. Jobs created before attempts were recorded have none.
 
-`download_url` differs from `url` when playlist parameters were stripped from a YouTube link. For a failed download, `error` is yt-dlp's message, `error_type` the class of the root exception, `error_phase` the step that failed, and `error_code` one of the codes below. `error_phase` is `extraction` (yt-dlp reads the video page and chooses the formats), `media` (it downloads the chosen formats) or `postprocessing` (ffmpeg merges or converts them); it is null for an interrupted job and for jobs that failed before it was recorded.
+YouTube jobs also carry `used_youtube_cookies` (`true` when the attempt with `youtube_cookies.txt` ran).
+
+`download_url` differs from `url` when playlist parameters were stripped from a YouTube link. For a failed download, `error` is yt-dlp's message of the failed attempt that [Attempts](#attempts) names, `error_type` the class of the root exception, `error_phase` the step that failed, and `error_code` one of the codes below. `error_phase` is `extraction` (yt-dlp reads the video page and chooses the formats), `media` (it downloads the chosen formats) or `postprocessing` (ffmpeg merges or converts them); it is null for an interrupted job and for jobs that failed before it was recorded.
 
 - `rate_limited` - The site throttles requests (YouTube: "try again later"), retry in about an hour
 - `needs_auth` - Login, age confirmation or a private video, export `instagram_cookies.txt` (see above), or `youtube_cookies.txt` for YouTube

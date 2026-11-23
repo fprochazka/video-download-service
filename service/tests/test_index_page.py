@@ -175,6 +175,10 @@ def test_failed_job_lists_the_subtitles_and_details_it_kept(page_script):
     assert result['status']['className'] == 'status error'
     assert result['status']['text'].startswith('Error: unable to download video data: HTTP Error 403')
     assert 'The site refused the video file to this server (HTTP 403).' in result['status']['text']
+    assert (
+        'Tried 3 times: 1. the configured options: network; 2. the configured options, again after a transient '
+        'failure: forbidden; 3. player_client &lt;tv&gt;: forbidden'
+    ) in result['status']['text']
     assert result['groups'] == ['Subtitles', 'Details']
     assert result['links'] == [
         f'/downloads/{JOB_ID}/Some_video-abc.en.vtt',

@@ -130,9 +130,11 @@ def classify_error(exc: BaseException, phase: str | None = None) -> dict:
     return {'error': message, 'error_code': code, 'error_type': type(root).__name__, 'error_phase': phase}
 
 
-def is_needs_auth(exc: BaseException) -> bool:
+def classify_error_safely(exc: BaseException, phase: str | None = None) -> dict:
+    """classify_error that never raises, a bug in the classification must not hide the failure itself"""
     try:
-        return classify_error(exc)['error_code'] == 'needs_auth'
+        return classify_error(exc, phase)
     except Exception:
-        logger.exception('Could not classify an error for the YouTube cookies retry')
-        return False
+        logger.exception('Could not classify a download failure')
+        name = type(exc).__name__
+        return {'error': str(exc) or name, 'error_code': 'unknown', 'error_type': name, 'error_phase': phase}

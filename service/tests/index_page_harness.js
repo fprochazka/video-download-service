@@ -281,7 +281,12 @@ const EVIL_MEDIA = '"><img src=x onerror=alert(1)>.mp4';
         if (scenario === 'job-failed-with-files') {
             const completed = completedJob(jobId);
             Object.assign(job, {
-                error_code: 'forbidden', title: completed.title, uploader: 'jawed', duration: 19,
+                error_code: 'forbidden', title: completed.title,
+                attempts: [
+                    { attempt: 1, changes: [], retry: false, error_code: 'network' },
+                    { attempt: 2, changes: [], retry: true, error_code: 'forbidden' },
+                    { attempt: 3, changes: ['player_client <tv>'], retry: false, error_code: 'forbidden' },
+                ], uploader: 'jawed', duration: 19,
                 artifacts: completed.artifacts.filter((a) => a.kind !== 'media'), deleted_files: completed.deleted_files,
             });
         }

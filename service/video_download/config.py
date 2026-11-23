@@ -41,6 +41,20 @@ def load_user_config() -> tuple[dict, dict]:
     return EXTRACTOR_ARGS, YTDLP_OPTS
 
 
+# Tried one at a time after YouTube refused the media or offered no format; none of them needs a PO token
+DEFAULT_YOUTUBE_FALLBACK_CLIENTS = ('visionos', 'tv', 'web_embedded')
+
+
+def youtube_fallback_clients() -> list[str]:
+    """The YouTube player clients of the fallback attempts, YOUTUBE_FALLBACK_CLIENTS in extractor_config.py"""
+    try:
+        import extractor_config
+    except ImportError:
+        return list(DEFAULT_YOUTUBE_FALLBACK_CLIENTS)
+    clients = getattr(extractor_config, 'YOUTUBE_FALLBACK_CLIENTS', DEFAULT_YOUTUBE_FALLBACK_CLIENTS)
+    return [clients] if isinstance(clients, str) else [str(client) for client in clients]
+
+
 # --- Parsing, each value checked
 
 
@@ -131,6 +145,14 @@ def mcp_allowed_hosts() -> list[str]:
 def download_concurrency() -> int:
     """How many downloads run at the same time, the rest wait in the worker's queue"""
     return env_int('DOWNLOAD_CONCURRENCY', 2)
+
+
+DEFAULT_RETRY_PAUSE_SECONDS = 15
+
+
+def download_retry_pause() -> float:
+    """Seconds to wait before a download that failed with a transient error is tried again; it holds a worker slot"""
+    return env_float('DOWNLOAD_RETRY_PAUSE_SECONDS', DEFAULT_RETRY_PAUSE_SECONDS)
 
 
 def transcription_concurrency() -> int:
@@ -244,6 +266,7 @@ def validate():
     public_base_url()
     mcp_allowed_hosts()
     download_concurrency()
+    download_retry_pause()
     transcription_concurrency()
     chunk_minutes()
     chunk_concurrency()
