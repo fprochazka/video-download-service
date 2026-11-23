@@ -11,6 +11,7 @@ from yt_dlp.utils import ExtractorError, PostProcessingError
 from tests.ytdlp_fakes import (
     FakeYoutubeDL,
     extractor_error_caused_by,
+    http_error,
     media_refused,
     raise_like_ytdlp,
     read_metadata,
@@ -232,6 +233,27 @@ def network_down():
     )
 
 
+def page_refused():
+    raise_like_ytdlp(
+        extractor_error_caused_by(http_error(403, 'Forbidden'), 'Unable to download webpage: HTTP Error 403')
+    )
+
+
+def no_formats():
+    raise_like_ytdlp(ExtractorError('No video formats found!', expected=True, ie='youtube', video_id='dQw4w9WgXcQ'))
+
+
+def format_unavailable():
+    raise_like_ytdlp(
+        ExtractorError(
+            'Requested format is not available. Use --list-formats for a list of available formats',
+            expected=True,
+            ie='youtube',
+            video_id='dQw4w9WgXcQ',
+        )
+    )
+
+
 def postprocessing_failed():
     raise_like_ytdlp(PostProcessingError('Postprocessing: Conversion failed!'))
 
@@ -247,6 +269,10 @@ def crashed():
         (age_gated, 'needs_auth', 'ExtractorError', '[youtube] dQw4w9WgXcQ: Sign in to confirm your age'),
         (instagram_restricted, 'needs_auth', 'ExtractorError', '[Instagram] ABC123: This content may be'),
         (network_down, 'network', 'TransportError', 'Unable to download webpage'),
+        # A 403 on the video page is not a refused media file
+        (page_refused, 'network', 'HTTPError', 'Unable to download webpage: HTTP Error 403'),
+        (no_formats, 'no_formats', 'ExtractorError', '[youtube] dQw4w9WgXcQ: No video formats found!'),
+        (format_unavailable, 'format_unavailable', 'ExtractorError', '[youtube] dQw4w9WgXcQ: Requested format'),
         (postprocessing_failed, 'postprocessing', 'PostProcessingError', 'Postprocessing: Conversion failed!'),
         (crashed, 'unknown', 'RuntimeError', 'boom'),
     ],
@@ -267,10 +293,32 @@ def test_failed_download_is_classified(client, downloads_dir, caplog, raiser, er
     assert metadata['error_type'] == error_type
     assert metadata['error'].startswith(error_start)
     assert '\x1b' not in metadata['error']
+    assert metadata['error_phase'] == ('postprocessing' if error_code == 'postprocessing' else 'extraction')
     assert any(download_id in r.getMessage() and f'error_code={error_code}' in r.getMessage() for r in caplog.records)
 
     status = client.get(f'/status/{download_id}').json()
     assert status['error_code'] == error_code
+    assert status['error_phase'] == metadata['error_phase']
+
+
+@pytest.mark.parametrize(
+    ('raiser', 'error_code', 'error_phase'),
+    [
+        (media_refused, 'forbidden', 'media'),
+        (lambda: media_refused(500, 'Internal Server Error'), 'network', 'media'),
+        (lambda: media_refused(404, 'Not Found'), 'unavailable', 'media'),
+        (postprocessing_failed, 'postprocessing', 'postprocessing'),
+    ],
+)
+def test_failed_media_download_is_classified(client, downloads_dir, raiser, error_code, error_phase):
+    FakeYoutubeDL.behaviour = lambda opts, url: {'id': 'x', 'title': 'Video'}
+    FakeYoutubeDL.download_behaviour = lambda ydl, info: raiser()
+
+    download_id = client.post('/download', data={'url': 'https://vimeo.com/123456789'}).json()['download_id']
+
+    metadata = read_metadata(downloads_dir, download_id)
+    assert metadata['status'] == 'failed'
+    assert (metadata['error_code'], metadata['error_phase']) == (error_code, error_phase)
 
 
 def test_metadata_keeps_created_at(client, downloads_dir, monkeypatch):
@@ -714,6 +762,8 @@ def test_failed_media_keeps_the_subtitles_and_details(client, downloads_dir, cap
     metadata = read_metadata(downloads_dir, download_id)
     assert metadata['status'] == 'failed'
     assert metadata['error'] == 'unable to download video data: HTTP Error 403: Forbidden'
+    assert metadata['error_code'] == 'forbidden'
+    assert metadata['error_phase'] == 'media'
     assert metadata['error_type'] == 'HTTPError'
     assert metadata['files'] == []
     assert metadata['title'] == 'Czech Video'

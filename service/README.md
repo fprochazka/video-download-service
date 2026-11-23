@@ -20,7 +20,7 @@ A simple web service for downloading videos from various platforms using yt-dlp 
   - `pending` - Download queued
   - `downloading` - Video being downloaded
   - `completed` - At least one media file was downloaded
-  - `failed` - Error occurred, or yt-dlp finished without a media file (details in `error`, `error_code`, `error_type`). When the extraction worked and only the media failed, the job still lists the subtitles and `info.json`, and the page shows them with the video details
+  - `failed` - Error occurred, or yt-dlp finished without a media file (details in `error`, `error_code`, `error_type`, `error_phase`). When the extraction worked and only the media failed, the job still lists the subtitles and `info.json`, and the page shows them with the video details
 - **Transcription** - A Transcribe button on each media file sends its audio to Google Gemini or ElevenLabs Scribe and adds a Markdown and a JSON transcript with timestamps and speaker labels to the job, see [Transcription](#transcription)
 - **MCP server** - Agents such as Claude Code download and transcribe videos through the `/mcp` endpoint, see [MCP server](#mcp-server)
 - **Cleanup of old media** - Media files over 5 MB are deleted 90 days after their job finished, the job page and its subtitles and details stay, see [Garbage collection](#garbage-collection)
@@ -501,7 +501,7 @@ The endpoint has no authentication and no CSRF token, because the service is rea
 Tools:
 
 - `download_video(url, force=false)` - starts a job for a link to one video or one post, with the same URL rules as the web form: a link to a playlist, channel, profile or other collection is a tool error. When the video has a job already (see [A link submitted again](#a-link-submitted-again)), the tool downloads nothing and returns that job with `existing: true`; `force=true` starts a new job anyway. It never transcribes: downloading and transcribing are always two steps, so the agent reads the subtitles that come free with the download before it pays for a transcript. A client without task support gets the job at once; see [MCP tasks](#mcp-tasks) for the others.
-- `get_job(download_id, wait_seconds=0)` - the job's state, the video details (title, duration, uploader, thumbnail and the others of `metadata.json`), the download `progress` while it runs, the error and `error_code` of a failed job, the files with their kind, size and URL, and each transcription with its state, its cost (`cost_estimated` is `false` for an amount the provider reported) and the `provider_report`. With `wait_seconds` (0 to 60) the tool answers once the job changes or ends, so an agent needs fewer calls. A change of the progress alone does not end the wait.
+- `get_job(download_id, wait_seconds=0)` - the job's state, the video details (title, duration, uploader, thumbnail and the others of `metadata.json`), the download `progress` while it runs, the error, `error_code` and `error_phase` of a failed job, the files with their kind, size and URL, and each transcription with its state, its cost (`cost_estimated` is `false` for an amount the provider reported) and the `provider_report`. With `wait_seconds` (0 to 60) the tool answers once the job changes or ends, so an agent needs fewer calls. A change of the progress alone does not end the wait.
 - `transcribe_file(download_id, filename)` - transcribes one media file of a completed job, with the same rules as the Transcribe button. It replaces an earlier transcript of the file. Its description names the provider and its price, for example `with ElevenLabs Scribe, $0.22 per hour of audio`. The agent is told to prefer the subtitles and to call it when the user asks for a transcript, or when the job has no subtitles or they look broken: truncated, in the wrong language or garbled.
 
 Without a transcription provider the server offers no transcription: there is no `transcribe_file` tool, and neither the descriptions nor the server instructions mention transcription. The service reads the key once at startup, so a change takes a restart. The transcripts resource stays, for transcripts made earlier.
@@ -674,6 +674,7 @@ Each download creates a `metadata.json` file with:
   "error": null,
   "error_code": null,
   "error_type": null,
+  "error_phase": null,
   "created_at": "2025-01-14T12:00:00",
   "updated_at": "2025-01-14T12:05:00",
   "completed_at": "2025-01-14T12:05:00",
@@ -734,14 +735,17 @@ The video details (`title` to `resolution`, `filesize_approx`, `chapters_count` 
 
 YouTube jobs also carry `used_youtube_cookies` (`true` when the retry with `youtube_cookies.txt` ran).
 
-`download_url` differs from `url` when playlist parameters were stripped from a YouTube link. For a failed download, `error` is yt-dlp's message, `error_type` the class of the root exception, and `error_code` one of:
+`download_url` differs from `url` when playlist parameters were stripped from a YouTube link. For a failed download, `error` is yt-dlp's message, `error_type` the class of the root exception, `error_phase` the step that failed, and `error_code` one of the codes below. `error_phase` is `extraction` (yt-dlp reads the video page and chooses the formats), `media` (it downloads the chosen formats) or `postprocessing` (ffmpeg merges or converts them); it is null for an interrupted job and for jobs that failed before it was recorded.
 
 - `rate_limited` - The site throttles requests (YouTube: "try again later"), retry in about an hour
 - `needs_auth` - Login, age confirmation or a private video, export `instagram_cookies.txt` (see above), or `youtube_cookies.txt` for YouTube
 - `unavailable` - Removed, private or otherwise not available
 - `unsupported` - yt-dlp has no extractor for the URL
 - `geo_restricted` - Not available from the server's location
-- `network` - Connection or HTTP failure
+- `network` - Connection or HTTP failure, a server error (5xx), or a refused request (403) for the video page
+- `forbidden` - The site refused the media file (HTTP 403) after the extraction worked. On YouTube this is often a block of the server's address or of the player client yt-dlp used
+- `no_formats` - The extraction found no formats ("No video formats found"). On YouTube this often means that yt-dlp needs an update
+- `format_unavailable` - No format matches the format selection ("Requested format is not available"), see `format` in [Custom Extractor Configuration](#custom-extractor-configuration)
 - `postprocessing` - ffmpeg merging or conversion failed
 - `interrupted` - The service restarted while the download was running
 - `invalid_url` - yt-dlp could not interpret the URL

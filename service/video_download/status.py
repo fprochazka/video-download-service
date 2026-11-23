@@ -137,6 +137,7 @@ class DownloadStatus(BaseModel):
     error: str | None = None
     error_code: str | None = None
     error_type: str | None = None
+    error_phase: str | None = None  # extraction, media, postprocessing
     used_youtube_cookies: bool | None = None
     subtitles_error: str | None = None
     transcriptions: dict[str, Transcription] = {}

@@ -60,6 +60,7 @@ def create_job(url: str, download_url: str, extractor: str) -> dict:
         'error': None,
         'error_code': None,
         'error_type': None,
+        'error_phase': None,
         'created_at': created_at,
         'updated_at': created_at,
     }
@@ -102,16 +103,10 @@ async def download_youtube(
     """First attempt without cookies, one retry with the YouTube cookies file when YouTube asks for a login"""
     update_metadata(download_dir, used_youtube_cookies=False)
     ydl_opts = build_ydl_opts(download_dir, ytdlp_logger)
-    try:
-        result = await asyncio.to_thread(run_ytdlp, ydl_opts, download_url, progress)
-    except Exception as e:
-        cookies_file = config.youtube_cookies_file()
-        if cookies_file is None or not is_needs_auth(e):
-            raise
-    else:
-        cookies_file = config.youtube_cookies_file() if result.error is not None else None
-        if cookies_file is None or not is_needs_auth(result.error):
-            return result
+    result = await asyncio.to_thread(run_ytdlp, ydl_opts, download_url, progress)
+    cookies_file = config.youtube_cookies_file() if result.error is not None else None
+    if cookies_file is None or not is_needs_auth(result.error):
+        return result
 
     logger.info('Download %s needs a YouTube login, retrying with YouTube cookies from %s', download_id, cookies_file)
     ytdlp_logger.info('YouTube asked for a login, retrying with YouTube cookies from %s', cookies_file)
@@ -159,13 +154,18 @@ def mark_failed(download_dir: Path, download_id: str, error: dict, extractor: st
         logger.exception('Could not store the failure of download %s', download_id)
 
 
-def classify(download_id: str, exc: Exception) -> dict:
+def classify(download_id: str, exc: Exception, phase: str | None = None) -> dict:
     logger.debug('Download %s raised', download_id, exc_info=exc)
     try:
-        return classify_error(exc)
+        return classify_error(exc, phase)
     except Exception:
         logger.exception('Could not classify the failure of download %s', download_id)
-        return {'error': str(exc) or type(exc).__name__, 'error_code': 'unknown', 'error_type': type(exc).__name__}
+        return {
+            'error': str(exc) or type(exc).__name__,
+            'error_code': 'unknown',
+            'error_type': type(exc).__name__,
+            'error_phase': phase,
+        }
 
 
 async def download_video_task(download_id: str, url: str):
@@ -203,7 +203,8 @@ async def download_video_task(download_id: str, url: str):
         if result.subtitles_error:
             logger.warning('Download %s: subtitles failed: %s', download_id, result.subtitles_error)
         if result.error is not None:
-            mark_failed(download_dir, download_id, classify(download_id, result.error), extractor, **kept)
+            error = classify(download_id, result.error, result.error_phase)
+            mark_failed(download_dir, download_id, error, extractor, **kept)
         elif files:
             update_metadata(
                 download_dir, status='completed', files=files, completed_at=storage.now_iso(), progress=None, **kept
@@ -214,6 +215,7 @@ async def download_video_task(download_id: str, url: str):
                 'error': 'The download finished without producing any media file.',
                 'error_code': 'unknown',
                 'error_type': None,
+                'error_phase': None,
             }
             mark_failed(download_dir, download_id, error, extractor, **kept)
 
@@ -245,6 +247,7 @@ def fail_interrupted_downloads(downloads_dir: Path):
                 error='The download was interrupted by a service restart, please try again.',
                 error_code='interrupted',
                 error_type=None,
+                error_phase=None,
             )
             logger.warning('Download %s was interrupted by a restart, marked as failed', download_dir.name)
         except Exception:

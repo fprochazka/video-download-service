@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING
 import yt_dlp
 
 from video_download import config, subtitles
-from video_download.errors import classify_error
+from video_download.errors import EXTRACTION, MEDIA, classify_error
 from video_download.storage import LOG_FILENAME, PRIVATE_FILENAMES
 
 if TYPE_CHECKING:
@@ -80,8 +80,10 @@ class DownloadResult:
     clean_info: dict | None = None
     subtitle_tracks: dict[str, bool] | None = None
     subtitles_error: str | None = None
-    # The failure of the media download after a successful extraction; info and subtitle_tracks are still set
+    # The failure of the run; after a failed media download, info and subtitle_tracks are still set
     error: Exception | None = None
+    # EXTRACTION or MEDIA, the step that raised error
+    error_phase: str | None = None
     # The options of the run, so that fetch_subtitles can fetch the subtitles of a failed run later
     ydl_opts: dict | None = None
 
@@ -94,8 +96,8 @@ def run_ytdlp(ydl_opts: dict, url: str, progress: DownloadProgress | None = None
     the result and never raises. With progress, the video details are stored right after the extraction and yt-dlp
     reports its progress to it.
 
-    A failed extraction raises. A failed media download returns the result with the error and the extracted info, but
-    without the subtitles: the caller decides whether to try again or to fetch them with fetch_subtitles.
+    A failure does not raise, the result has the error and its phase. A failed media download keeps the extracted
+    info, but has no subtitles: the caller decides whether to try again or to fetch them with fetch_subtitles.
     """
     if progress is not None:
         ydl_opts = ydl_opts | {
@@ -103,7 +105,10 @@ def run_ytdlp(ydl_opts: dict, url: str, progress: DownloadProgress | None = None
             'postprocessor_hooks': [progress.postprocessor_hook],
         }
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(url, download=False)
+        try:
+            info = ydl.extract_info(url, download=False)
+        except Exception as e:
+            return DownloadResult(None, [], error=e, error_phase=EXTRACTION, ydl_opts=ydl_opts)
         if info is None:
             return DownloadResult(None, [])
         tracks = subtitles.select_subtitle_tracks(info)
@@ -113,7 +118,7 @@ def run_ytdlp(ydl_opts: dict, url: str, progress: DownloadProgress | None = None
             downloaded = ydl.process_ie_result(info, download=True)
         except Exception as e:
             clean_info = ydl.sanitize_info(info, remove_private_keys=True)
-            return DownloadResult(info, [], clean_info, tracks, error=e, ydl_opts=ydl_opts)
+            return DownloadResult(info, [], clean_info, tracks, error=e, error_phase=MEDIA, ydl_opts=ydl_opts)
         if downloaded is None:
             return DownloadResult(None, [])
         result = DownloadResult(

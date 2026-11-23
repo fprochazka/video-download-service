@@ -297,6 +297,9 @@ class Job(BaseModel):
     progress: Progress | None = Field(description='while downloading')
     error: str | None
     error_code: str | None
+    error_phase: str | None = Field(
+        None, description='the step that failed: extraction (reading the video page), media or postprocessing'
+    )
     transcription_available: bool
     files: list[JobFile]
     transcriptions: dict[str, JobTranscription] = Field(description='by media file name')
@@ -386,6 +389,7 @@ def job_summary(download_dir: Path, metadata: dict, base_url: str | None, existi
         progress=status.progress,
         error=status.error,
         error_code=status.error_code,
+        error_phase=status.error_phase,
         transcription_available=status.transcription_available,
         files=files,
         transcriptions=transcriptions,

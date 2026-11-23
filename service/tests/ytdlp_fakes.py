@@ -77,13 +77,14 @@ def raise_like_ytdlp(exc: Exception):
         raise DownloadError(f'\x1b[0;31mERROR:\x1b[0m {error}', exc_info) from None
 
 
+def http_error(status: int, reason: str) -> HTTPError:
+    return HTTPError(Response(io.BytesIO(b''), 'https://media.example.com/videoplayback?id=1', {}, status, reason))
+
+
 def media_refused(status: int = 403, reason: str = 'Forbidden'):
     """Raise what yt-dlp's http downloader raises when the server refuses the media, it does not retry a 4xx"""
-    response = Response(
-        io.BytesIO(b''), 'https://media.example.com/videoplayback?id=1', {}, status=status, reason=reason
-    )
     try:
-        raise HTTPError(response)
+        raise http_error(status, reason)
     except HTTPError as error:
         raise DownloadError(f'\x1b[0;31mERROR:\x1b[0m unable to download video data: {error}', sys.exc_info()) from None
 
