@@ -1,4 +1,4 @@
-"""Classification of download failures into the error_code values stored in metadata"""
+"""Classification of download failures into the error_code and error_phase values stored in metadata"""
 
 import asyncio
 import logging
@@ -17,8 +17,16 @@ logger = logging.getLogger(__name__)
 
 ANSI_ESCAPE_RE = re.compile(r'\x1b\[[0-9;]*[A-Za-z]')
 
-# Checked in order, the first matching group wins
+# The step of a download that failed: yt-dlp reading the video page and choosing the formats, downloading the media,
+# or ffmpeg merging or converting it
+EXTRACTION = 'extraction'
+MEDIA = 'media'
+POSTPROCESSING = 'postprocessing'
+
+# Checked in order, the first matching group wins; the format messages say "not available" too
 ERROR_MESSAGE_PATTERNS = [
+    ('no_formats', ('no video formats found',)),
+    ('format_unavailable', ('requested format is not available',)),
     ('rate_limited', ('rate-limited', 'rate limit', 'try again later', 'too many requests', 'http error 429')),
     (
         'needs_auth',
@@ -71,7 +79,7 @@ def unwrap_error(exc: BaseException) -> BaseException:
     return exc
 
 
-def classify_by_type(root: BaseException) -> str | None:
+def classify_by_type(root: BaseException, phase: str | None) -> str | None:
     candidates = [root, getattr(root, 'cause', None)]
     for exc in candidates:
         if exc is None:
@@ -91,6 +99,9 @@ def classify_by_type(root: BaseException) -> str | None:
                 return 'needs_auth'
             if exc.status in (404, 410):
                 return 'unavailable'
+            # A 403 on the media URL after a working extraction: the site refuses this client or this server
+            if exc.status == 403 and phase == MEDIA:
+                return 'forbidden'
             return 'network'
         if isinstance(exc, TransportError):
             return 'network'
@@ -105,17 +116,25 @@ def classify_by_message(message: str) -> str:
     return 'unknown'
 
 
-def classify_error(exc: BaseException) -> dict:
-    """Turn an exception from a download into the error fields stored in metadata"""
+def classify_error(exc: BaseException, phase: str | None = None) -> dict:
+    """Turn an exception from a download into the error fields stored in metadata.
+
+    phase is the step that raised, EXTRACTION or MEDIA, None when unknown; a postprocessing error of the media step
+    gets the phase POSTPROCESSING.
+    """
     root = unwrap_error(exc)
     message = clean_error_message(str(exc)) or clean_error_message(str(root)) or type(root).__name__
-    code = classify_by_type(root) or classify_by_message(message)
-    return {'error': message, 'error_code': code, 'error_type': type(root).__name__}
+    code = classify_by_type(root, phase) or classify_by_message(message)
+    if code == 'postprocessing' and phase is not None:
+        phase = POSTPROCESSING
+    return {'error': message, 'error_code': code, 'error_type': type(root).__name__, 'error_phase': phase}
 
 
-def is_needs_auth(exc: BaseException) -> bool:
+def classify_error_safely(exc: BaseException, phase: str | None = None) -> dict:
+    """classify_error that never raises, a bug in the classification must not hide the failure itself"""
     try:
-        return classify_error(exc)['error_code'] == 'needs_auth'
+        return classify_error(exc, phase)
     except Exception:
-        logger.exception('Could not classify an error for the YouTube cookies retry')
-        return False
+        logger.exception('Could not classify a download failure')
+        name = type(exc).__name__
+        return {'error': str(exc) or name, 'error_code': 'unknown', 'error_type': name, 'error_phase': phase}

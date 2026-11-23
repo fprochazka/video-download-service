@@ -26,3 +26,16 @@ docker compose up -d
 ```
 
 The [service README](service/README.md#using-tailscale-secure-remote-access) has the Tailscale setup and the rest.
+
+## Commit hooks
+
+The service runs on a real deployment, so its URLs, job IDs, tailnet hostnames, account addresses, cookies and `app.env` values end up in terminals, logs, scratch files and benchmark runs, and from there they can slip into a commit. `scripts/hooks` holds a pre-commit and a commit-msg hook that refuse a commit when a staged line or the commit message matches a private identifier. They cover both projects. The identifiers live in a file outside the repository, because listing them here would publish the strings the hooks exist to keep out. Set it up once per clone, worktrees share it:
+
+```shell
+git config core.hooksPath scripts/hooks
+git config hooks.forbiddenPatternsFile ~/.config/git/forbidden-patterns.txt  # any path outside the repo
+```
+
+The file holds one extended regex per line, matched case-insensitively; blank lines and `#` comments are ignored. Until `hooks.forbiddenPatternsFile` points at a file with at least one pattern, both hooks refuse every commit and print how to fix it. Docs and tests use placeholders such as `video-download.your-tailnet-name.ts.net`.
+
+A rebase does not run the hooks. After you reword or squash commits in a rebase, check the new messages against the patterns file yourself before you push.

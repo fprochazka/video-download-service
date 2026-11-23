@@ -1,14 +1,13 @@
 """Download jobs: creating one, running it in the background, and failing the ones a restart interrupted"""
 
 import asyncio
-import io
 import logging
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
-from video_download import config, download_index, storage
-from video_download.errors import classify_error, is_needs_auth
+from video_download import attempts, config, download_index, storage
+from video_download.errors import classify_error, classify_error_safely
 from video_download.progress import DownloadProgress
 from video_download.storage import (
     ACTIVE_STATUSES,
@@ -26,14 +25,11 @@ from video_download.urls import resolve_download_url, video_key
 from video_download.worker import DOWNLOAD, JobWorker
 from video_download.ytdlp import (
     DownloadResult,
-    build_ydl_opts,
     cleanup_ytdlp_logger,
     collect_downloaded_files,
     collect_subtitle_files,
     extract_video_metadata,
-    is_instagram_extractor,
-    is_youtube_extractor,
-    run_ytdlp,
+    fetch_subtitles,
     setup_ytdlp_logger,
 )
 
@@ -59,6 +55,7 @@ def create_job(url: str, download_url: str, extractor: str) -> dict:
         'error': None,
         'error_code': None,
         'error_type': None,
+        'error_phase': None,
         'created_at': created_at,
         'updated_at': created_at,
     }
@@ -95,28 +92,6 @@ def submit_download(worker: JobWorker, url: str, force: bool = False) -> Submiss
     return Submission(metadata['download_id'], existing=False)
 
 
-async def download_youtube(
-    download_id: str, download_dir: Path, download_url: str, ytdlp_logger: logging.Logger, progress: DownloadProgress
-) -> DownloadResult:
-    """First attempt without cookies, one retry with the YouTube cookies file when YouTube asks for a login"""
-    update_metadata(download_dir, used_youtube_cookies=False)
-    ydl_opts = build_ydl_opts(download_dir, ytdlp_logger)
-    try:
-        return await asyncio.to_thread(run_ytdlp, ydl_opts, download_url, progress)
-    except Exception as e:
-        cookies_file = config.youtube_cookies_file()
-        if cookies_file is None or not is_needs_auth(e):
-            raise
-
-    logger.info('Download %s needs a YouTube login, retrying with YouTube cookies from %s', download_id, cookies_file)
-    ytdlp_logger.info('YouTube asked for a login, retrying with YouTube cookies from %s', cookies_file)
-    update_metadata(download_dir, used_youtube_cookies=True)
-    retry_opts = build_ydl_opts(download_dir, ytdlp_logger)
-    # A text stream instead of the path, so yt-dlp never writes the cookies back to the file
-    retry_opts['cookiefile'] = io.StringIO(cookies_file.read_text(encoding='utf-8'))
-    return await asyncio.to_thread(run_ytdlp, retry_opts, download_url, progress)
-
-
 def subtitle_artifacts(download_dir: Path, result: DownloadResult) -> list[dict]:
     tracks = result.subtitle_tracks or {}
     return [
@@ -138,7 +113,8 @@ def write_info_file(download_id: str, download_dir: Path, result: DownloadResult
         return False
 
 
-def mark_failed(download_dir: Path, download_id: str, error: dict, extractor: str | None = None):
+def mark_failed(download_dir: Path, download_id: str, error: dict, extractor: str | None = None, **fields):
+    """Store the failure; fields are what the job kept despite it, such as its subtitles and details"""
     logger.error(
         'Download %s failed: extractor=%s error_code=%s error_type=%s: %s',
         download_id,
@@ -148,9 +124,14 @@ def mark_failed(download_dir: Path, download_id: str, error: dict, extractor: st
         error['error'],
     )
     try:
-        update_metadata(download_dir, status='failed', progress=None, **error)
+        update_metadata(download_dir, **fields, status='failed', progress=None, **error)
     except Exception:
         logger.exception('Could not store the failure of download %s', download_id)
+
+
+def classify(download_id: str, exc: Exception, phase: str | None = None) -> dict:
+    logger.debug('Download %s raised', download_id, exc_info=exc)
+    return classify_error_safely(exc, phase)
 
 
 async def download_video_task(download_id: str, url: str):
@@ -165,43 +146,40 @@ async def download_video_task(download_id: str, url: str):
         download_url = metadata.get('download_url') or url
 
         ytdlp_logger = setup_ytdlp_logger(download_id, download_dir)
-        if is_youtube_extractor(extractor):
-            result = await download_youtube(download_id, download_dir, download_url, ytdlp_logger, progress)
-        else:
-            ydl_opts = build_ydl_opts(download_dir, ytdlp_logger, instagram_cookies=is_instagram_extractor(extractor))
-            result = await asyncio.to_thread(run_ytdlp, ydl_opts, download_url, progress)
+        result = await attempts.download(download_id, download_dir, download_url, extractor, ytdlp_logger, progress)
+        if result.error is not None:
+            # The media failed, but the last extraction has the details and the subtitles, which the job keeps
+            await asyncio.to_thread(fetch_subtitles, result, progress)
         progress.close()
 
         files = collect_downloaded_files(result.media_filepaths, download_dir)
-        video_metadata = extract_video_metadata(result.info) if result.info else {}
-        if files:
-            artifacts = [artifact(download_dir, name, MEDIA) for name in files]
-            artifacts += subtitle_artifacts(download_dir, result)
-            if write_info_file(download_id, download_dir, result):
-                artifacts.append(artifact(download_dir, INFO_FILENAME, INFO))
-            if result.subtitles_error:
-                logger.warning(
-                    'Download %s: subtitles failed, the media is kept: %s', download_id, result.subtitles_error
-                )
+        artifacts = [artifact(download_dir, name, MEDIA) for name in files]
+        artifacts += subtitle_artifacts(download_dir, result)
+        if write_info_file(download_id, download_dir, result):
+            artifacts.append(artifact(download_dir, INFO_FILENAME, INFO))
+        kept = {
+            'artifacts': artifacts,
+            'subtitles_error': result.subtitles_error,
+            **(extract_video_metadata(result.info) if result.info else {}),
+        }
+        if result.subtitles_error:
+            logger.warning('Download %s: subtitles failed: %s', download_id, result.subtitles_error)
+        if result.error is not None:
+            error = classify(download_id, result.error, result.error_phase)
+            mark_failed(download_dir, download_id, error, extractor, **kept)
+        elif files:
             update_metadata(
-                download_dir,
-                status='completed',
-                files=files,
-                artifacts=artifacts,
-                subtitles_error=result.subtitles_error,
-                completed_at=storage.now_iso(),
-                progress=None,
-                **video_metadata,
+                download_dir, status='completed', files=files, completed_at=storage.now_iso(), progress=None, **kept
             )
             logger.info('Download %s completed: extractor=%s files=%s', download_id, extractor, files)
         else:
-            update_metadata(download_dir, progress=None, **video_metadata)
             error = {
                 'error': 'The download finished without producing any media file.',
                 'error_code': 'unknown',
                 'error_type': None,
+                'error_phase': None,
             }
-            mark_failed(download_dir, download_id, error, extractor)
+            mark_failed(download_dir, download_id, error, extractor, **kept)
 
     except asyncio.CancelledError as e:
         # The thread of yt-dlp keeps running after the cancel, its hooks must not overwrite the failure
@@ -210,13 +188,7 @@ async def download_video_task(download_id: str, url: str):
         raise
     except Exception as e:
         progress.close()
-        logger.debug('Download %s raised', download_id, exc_info=True)
-        try:
-            error = classify_error(e)
-        except Exception:
-            logger.exception('Could not classify the failure of download %s', download_id)
-            error = {'error': str(e) or type(e).__name__, 'error_code': 'unknown', 'error_type': type(e).__name__}
-        mark_failed(download_dir, download_id, error, extractor)
+        mark_failed(download_dir, download_id, classify(download_id, e), extractor)
     finally:
         cleanup_ytdlp_logger(download_id)
 
@@ -237,6 +209,7 @@ def fail_interrupted_downloads(downloads_dir: Path):
                 error='The download was interrupted by a service restart, please try again.',
                 error_code='interrupted',
                 error_type=None,
+                error_phase=None,
             )
             logger.warning('Download %s was interrupted by a restart, marked as failed', download_dir.name)
         except Exception:

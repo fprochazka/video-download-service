@@ -125,6 +125,20 @@ class Progress(BaseModel):
     updated_at: str | None = None
 
 
+class DownloadAttempt(BaseModel):
+    """One yt-dlp run of a download; a job tries again or with other options after some failures"""
+
+    attempt: int = Field(description='1-based')
+    changes: list[str] = Field([], description='what the attempt changed in the configured options')
+    retry: bool = Field(False, description='the same options again after a transient failure')
+    started_at: str | None = None
+    ended_at: str | None = None
+    error: str | None = None
+    error_code: str | None = None
+    error_type: str | None = None
+    error_phase: str | None = None
+
+
 class DownloadStatus(BaseModel):
     download_id: str
     status: str  # pending, downloading, completed, failed
@@ -137,6 +151,8 @@ class DownloadStatus(BaseModel):
     error: str | None = None
     error_code: str | None = None
     error_type: str | None = None
+    error_phase: str | None = None  # extraction, media, postprocessing
+    attempts: list[DownloadAttempt] = []
     used_youtube_cookies: bool | None = None
     subtitles_error: str | None = None
     transcriptions: dict[str, Transcription] = {}

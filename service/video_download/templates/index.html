@@ -412,6 +412,10 @@
             unavailable: 'The video is not available (removed, private or region-locked).',
             unsupported: 'This site is not supported.',
             network: 'A network error occurred, try again later.',
+            forbidden: 'The site refused the video file to this server (HTTP 403). Try again later; if it keeps failing, the site may block the server\'s address.',
+            no_formats: 'The site offered no video formats to yt-dlp. On YouTube this often means that yt-dlp needs an update.',
+            format_unavailable: 'No format of the video matches the format selection. Check format in extractor_config.py (see README).',
+            postprocessing: 'ffmpeg could not merge or convert the downloaded file.',
             interrupted: 'The service restarted during the download, try again.',
         };
 
@@ -728,6 +732,97 @@
                 + '</div></div>';
         }
 
+        // Each yt-dlp run of a failed job: 1. the configured options: forbidden; 2. player_client tv: forbidden
+        function renderAttempts(status) {
+            const attempts = status.attempts || [];
+            if (attempts.length < 2) return '';
+            const items = attempts.map(attempt => {
+                let changes = (attempt.changes || []).join(', ') || 'the configured options';
+                if (attempt.retry) changes += ', again after a transient failure';
+                return `${attempt.attempt}. ${changes}: ${attempt.error_code || 'downloaded'}`;
+            });
+            return `<br><small class="attempts">Tried ${attempts.length} times: ${escapeHtml(items.join('; '))}</small>`;
+        }
+
+        // The video details from the extraction, also of a failed job whose media did not download
+        function renderVideoInfo(status, finishedLabel) {
+            let html = '<div class="metadata">';
+            html += '<h3>Video Information</h3>';
+            html += '<div class="metadata-grid">';
+
+            // Format date helper
+            function formatDate(dateStr) {
+                if (!dateStr) return null;
+                // Handle YYYYMMDD format
+                if (/^\d{8}$/.test(dateStr)) {
+                    const year = dateStr.substring(0, 4);
+                    const month = dateStr.substring(4, 6);
+                    const day = dateStr.substring(6, 8);
+                    return `${year}-${month}-${day}`;
+                }
+                return dateStr;
+            }
+
+            // Format number helper
+            function formatNumber(num) {
+                if (num === null || num === undefined) return null;
+                return num.toLocaleString();
+            }
+
+            // Define metadata fields to display with their labels
+            const metadataFields = [
+                { key: 'title', label: 'Title' },
+                { key: 'channel', label: 'Channel' },
+                { key: 'uploader', label: 'Uploader' },
+                { key: 'duration', label: 'Duration', formatter: formatDuration },
+                { key: 'upload_date', label: 'Upload Date', formatter: formatDate },
+                { key: 'view_count', label: 'Views', formatter: formatNumber },
+                { key: 'like_count', label: 'Likes', formatter: formatNumber },
+                { key: 'resolution', label: 'Resolution' },
+                { key: 'format', label: 'Format' },
+                { key: 'ext', label: 'Extension' },
+                { key: 'id', label: 'Video ID' },
+                { key: 'download_id', label: 'Download ID' },
+                { key: 'created_at', label: 'Started At', formatter: (val) => new Date(val).toLocaleString() },
+                { key: 'updated_at', label: finishedLabel, formatter: (val) => new Date(val).toLocaleString() }
+            ];
+
+            // Render metadata fields
+            metadataFields.forEach(field => {
+                let value = status[field.key];
+                if (value !== null && value !== undefined && value !== '') {
+                    if (field.formatter) {
+                        value = field.formatter(value);
+                    }
+                    if (value !== null && value !== undefined && value !== '') {
+                        html += `<div class="metadata-key">${escapeHtml(field.label)}:</div>`;
+                        html += `<div class="metadata-value">${escapeHtml(value)}</div>`;
+                    }
+                }
+            });
+
+            html += '</div>'; // Close metadata-grid
+
+            // Add description separately if present (it can be long)
+            if (status.description) {
+                html += '<div class="metadata-description">';
+                html += '<div class="metadata-key">Description:</div>';
+                html += `<div class="metadata-value">${escapeHtml(status.description).replace(/\n/g, '<br>')}</div>`;
+                html += '</div>';
+            }
+
+            // Add webpage URL if present
+            if (status.webpage_url && /^https?:\/\//i.test(status.webpage_url)) {
+                html += '<div style="margin-top: 12px; padding-top: 12px; border-top: 1px solid #dee2e6;">';
+                html += '<div class="metadata-key" style="display: inline;">Source:</div> ';
+                html += `<a href="${escapeHtml(status.webpage_url)}" target="_blank" rel="noopener noreferrer" style="color: #007bff; text-decoration: none;">${escapeHtml(status.webpage_url)}</a>`;
+                html += '</div>';
+            }
+
+            html += '</div>'; // Close metadata
+            return html;
+        }
+
         async function transcribeFile(downloadId, filename) {
             try {
                 const response = await fetch(`${fileHref(downloadId, filename)}/transcribe`, {
@@ -845,81 +940,7 @@
                     // File list
                     filesHtml += renderFiles(status);
 
-                    // Show metadata in pretty format
-                    filesHtml += '<div class="metadata">';
-                    filesHtml += '<h3>Video Information</h3>';
-                    filesHtml += '<div class="metadata-grid">';
-
-                    // Format date helper
-                    function formatDate(dateStr) {
-                        if (!dateStr) return null;
-                        // Handle YYYYMMDD format
-                        if (/^\d{8}$/.test(dateStr)) {
-                            const year = dateStr.substring(0, 4);
-                            const month = dateStr.substring(4, 6);
-                            const day = dateStr.substring(6, 8);
-                            return `${year}-${month}-${day}`;
-                        }
-                        return dateStr;
-                    }
-
-                    // Format number helper
-                    function formatNumber(num) {
-                        if (num === null || num === undefined) return null;
-                        return num.toLocaleString();
-                    }
-
-                    // Define metadata fields to display with their labels
-                    const metadataFields = [
-                        { key: 'title', label: 'Title' },
-                        { key: 'channel', label: 'Channel' },
-                        { key: 'uploader', label: 'Uploader' },
-                        { key: 'duration', label: 'Duration', formatter: formatDuration },
-                        { key: 'upload_date', label: 'Upload Date', formatter: formatDate },
-                        { key: 'view_count', label: 'Views', formatter: formatNumber },
-                        { key: 'like_count', label: 'Likes', formatter: formatNumber },
-                        { key: 'resolution', label: 'Resolution' },
-                        { key: 'format', label: 'Format' },
-                        { key: 'ext', label: 'Extension' },
-                        { key: 'id', label: 'Video ID' },
-                        { key: 'download_id', label: 'Download ID' },
-                        { key: 'created_at', label: 'Started At', formatter: (val) => new Date(val).toLocaleString() },
-                        { key: 'updated_at', label: 'Completed At', formatter: (val) => new Date(val).toLocaleString() }
-                    ];
-
-                    // Render metadata fields
-                    metadataFields.forEach(field => {
-                        let value = status[field.key];
-                        if (value !== null && value !== undefined && value !== '') {
-                            if (field.formatter) {
-                                value = field.formatter(value);
-                            }
-                            if (value !== null && value !== undefined && value !== '') {
-                                filesHtml += `<div class="metadata-key">${escapeHtml(field.label)}:</div>`;
-                                filesHtml += `<div class="metadata-value">${escapeHtml(value)}</div>`;
-                            }
-                        }
-                    });
-
-                    filesHtml += '</div>'; // Close metadata-grid
-
-                    // Add description separately if present (it can be long)
-                    if (status.description) {
-                        filesHtml += '<div class="metadata-description">';
-                        filesHtml += '<div class="metadata-key">Description:</div>';
-                        filesHtml += `<div class="metadata-value">${escapeHtml(status.description).replace(/\n/g, '<br>')}</div>`;
-                        filesHtml += '</div>';
-                    }
-
-                    // Add webpage URL if present
-                    if (status.webpage_url && /^https?:\/\//i.test(status.webpage_url)) {
-                        filesHtml += '<div style="margin-top: 12px; padding-top: 12px; border-top: 1px solid #dee2e6;">';
-                        filesHtml += '<div class="metadata-key" style="display: inline;">Source:</div> ';
-                        filesHtml += `<a href="${escapeHtml(status.webpage_url)}" target="_blank" rel="noopener noreferrer" style="color: #007bff; text-decoration: none;">${escapeHtml(status.webpage_url)}</a>`;
-                        filesHtml += '</div>';
-                    }
-
-                    filesHtml += '</div>'; // Close metadata
+                    filesHtml += renderVideoInfo(status, 'Completed At');
 
                     statusDiv.innerHTML = filesHtml;
                 } else if (status.status === 'failed') {
@@ -932,6 +953,14 @@
                     }
                     if (hint) {
                         errorHtml += `<br><small>${escapeHtml(hint)}</small>`;
+                    }
+                    errorHtml += renderAttempts(status);
+                    // The media failed, but the subtitles and details the extraction found are kept
+                    if ((status.artifacts || []).length > 0 || (status.deleted_files || []).length > 0) {
+                        errorHtml += renderFiles(status);
+                    }
+                    if (status.title) {
+                        errorHtml += renderVideoInfo(status, 'Failed At');
                     }
                     showError(errorHtml);
                 }

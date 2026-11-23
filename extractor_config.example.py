@@ -25,3 +25,7 @@ YTDLP_OPTS = {
     # 'ratelimit': 1000000,  # bytes per second
     # 'sleep_interval': 5,
 }
+
+# YouTube player clients that a job tries one at a time after YouTube refused the media (HTTP 403) or offered no
+# format, before it tries the format bv*+ba/b. Leave it out for the default, set it to [] to try no other client.
+# YOUTUBE_FALLBACK_CLIENTS = ['visionos', 'tv', 'web_embedded']

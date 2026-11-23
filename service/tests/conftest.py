@@ -22,6 +22,7 @@ SERVICE_ENV = (
     'TRANSCRIPTION_CHUNK_MINUTES',
     'TRANSCRIPTION_CHUNK_CONCURRENCY',
     'DOWNLOAD_CONCURRENCY',
+    'DOWNLOAD_RETRY_PAUSE_SECONDS',
     'PUBLIC_BASE_URL',
     'MCP_ALLOWED_HOSTS',
     'GC_ENABLED',
@@ -45,6 +46,9 @@ def downloads_dir(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(config, 'DOWNLOADS_DIR', directory)
     monkeypatch.setattr(config, 'load_user_config', lambda: ({}, {}))
+    monkeypatch.setattr(config, 'youtube_fallback_clients', lambda: list(config.DEFAULT_YOUTUBE_FALLBACK_CLIENTS))
+    # A transient failure is tried again at once
+    monkeypatch.setenv('DOWNLOAD_RETRY_PAUSE_SECONDS', '0')
     monkeypatch.setattr(yt_dlp, 'YoutubeDL', FakeYoutubeDL)
     FakeYoutubeDL.behaviour = None
     FakeYoutubeDL.subtitles_behaviour = None

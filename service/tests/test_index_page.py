@@ -156,6 +156,43 @@ def test_job_page_of_unknown_job_says_not_found(page_script):
     assert result['status'] == {'className': 'status error', 'text': 'Error: Download not found.'}
 
 
+def test_failed_job_shows_the_error_and_its_hint(page_script):
+    result = run_scenario(page_script, 'job-failed')
+
+    assert result['status'] == {
+        'className': 'status error',
+        'text': 'Error: unable to download video data: HTTP Error 403: &lt;Forbidden&gt;'
+        'A network error occurred, try again later.',
+    }
+    assert result['groups'] == []
+    assert 'metadata' not in result['html']
+    assert result['clears'] == 1
+
+
+def test_failed_job_lists_the_subtitles_and_details_it_kept(page_script):
+    result = run_scenario(page_script, 'job-failed-with-files')
+
+    assert result['status']['className'] == 'status error'
+    assert result['status']['text'].startswith('Error: unable to download video data: HTTP Error 403')
+    assert 'The site refused the video file to this server (HTTP 403).' in result['status']['text']
+    assert (
+        'Tried 3 times: 1. the configured options: network; 2. the configured options, again after a transient '
+        'failure: forbidden; 3. player_client &lt;tv&gt;: forbidden'
+    ) in result['status']['text']
+    assert result['groups'] == ['Subtitles', 'Details']
+    assert result['links'] == [
+        f'/downloads/{JOB_ID}/Some_video-abc.en.vtt',
+        f'/downloads/{JOB_ID}/Some_video-abc.cs-orig.vtt',
+        f'/downloads/{JOB_ID}/info.json',
+    ]
+    assert [b['text'] for b in result['buttons']] == ['Delete', 'Delete', 'Delete']
+    assert [d.split(':')[0] for d in result['deleted']] == ['Old-abc.en.vtt']
+    assert 'Video Information' in result['html']
+    assert 'Failed At' in result['html']
+    assert 'Some &lt;b&gt;video&lt;/b&gt;' in result['html']
+    assert '<b>video' not in result['html']
+
+
 def test_completed_job_lists_files_grouped_with_download_and_delete(page_script):
     result = run_scenario(page_script, 'job-completed')
 

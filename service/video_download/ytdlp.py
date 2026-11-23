@@ -1,5 +1,6 @@
 """yt-dlp options and the translation of its results into job files and metadata"""
 
+import io
 import logging
 from dataclasses import dataclass
 from pathlib import Path
@@ -8,7 +9,7 @@ from typing import TYPE_CHECKING
 import yt_dlp
 
 from video_download import config, subtitles
-from video_download.errors import classify_error
+from video_download.errors import EXTRACTION, MEDIA, classify_error
 from video_download.storage import LOG_FILENAME, PRIVATE_FILENAMES
 
 if TYPE_CHECKING:
@@ -79,6 +80,12 @@ class DownloadResult:
     clean_info: dict | None = None
     subtitle_tracks: dict[str, bool] | None = None
     subtitles_error: str | None = None
+    # The failure of the run; after a failed media download, info and subtitle_tracks are still set
+    error: Exception | None = None
+    # EXTRACTION or MEDIA, the step that raised error
+    error_phase: str | None = None
+    # The options of the run, so that fetch_subtitles can fetch the subtitles of a failed run later
+    ydl_opts: dict | None = None
 
 
 def run_ytdlp(ydl_opts: dict, url: str, progress: DownloadProgress | None = None) -> DownloadResult:
@@ -88,6 +95,9 @@ def run_ytdlp(ydl_opts: dict, url: str, progress: DownloadProgress | None = None
     subtitles before the media, so one failed track would fail the whole job. A failed subtitles pass is recorded in
     the result and never raises. With progress, the video details are stored right after the extraction and yt-dlp
     reports its progress to it.
+
+    A failure does not raise, the result has the error and its phase. A failed media download keeps the extracted
+    info, but has no subtitles: the caller decides whether to try again or to fetch them with fetch_subtitles.
     """
     if progress is not None:
         ydl_opts = ydl_opts | {
@@ -95,36 +105,64 @@ def run_ytdlp(ydl_opts: dict, url: str, progress: DownloadProgress | None = None
             'postprocessor_hooks': [progress.postprocessor_hook],
         }
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(url, download=False)
+        try:
+            info = ydl.extract_info(url, download=False)
+        except Exception as e:
+            return DownloadResult(None, [], error=e, error_phase=EXTRACTION, ydl_opts=ydl_opts)
         if info is None:
             return DownloadResult(None, [])
         tracks = subtitles.select_subtitle_tracks(info)
         if progress is not None:
             progress.extracted(info, tracks)
-        info = ydl.process_ie_result(info, download=True)
-        if info is None:
+        try:
+            downloaded = ydl.process_ie_result(info, download=True)
+        except Exception as e:
+            clean_info = ydl.sanitize_info(info, remove_private_keys=True)
+            return DownloadResult(info, [], clean_info, tracks, error=e, error_phase=MEDIA, ydl_opts=ydl_opts)
+        if downloaded is None:
             return DownloadResult(None, [])
-        result = DownloadResult(info, requested_filepaths(info), ydl.sanitize_info(info, remove_private_keys=True))
+        result = DownloadResult(
+            downloaded, requested_filepaths(downloaded), ydl.sanitize_info(downloaded, remove_private_keys=True)
+        )
         result.subtitle_tracks = tracks
-
-        if tracks:
-            ydl.params.update(
-                {
-                    'skip_download': True,
-                    'writesubtitles': True,
-                    'writeautomaticsub': True,
-                    'subtitleslangs': subtitles.subtitleslangs_option(tracks),
-                    'subtitlesformat': 'vtt/best',
-                }
-            )
-            if progress is not None:
-                progress.start_subtitles()
-            try:
-                ydl.process_ie_result(info, download=True)
-            except Exception as e:
-                result.subtitles_error = classify_error(e)['error']
-                ydl_opts['logger'].warning('Subtitles failed, the media is kept: %s', result.subtitles_error)
+        result.subtitles_error = download_subtitles(ydl, downloaded, tracks, progress)
         return result
+
+
+def fetch_subtitles(result: DownloadResult, progress: DownloadProgress | None = None):
+    """Download the subtitles of a run whose media download failed, from its extraction, without extracting again"""
+    if result.info is None or not result.subtitle_tracks or result.ydl_opts is None:
+        return
+    ydl_opts = dict(result.ydl_opts)
+    if isinstance(ydl_opts.get('cookiefile'), io.StringIO):
+        # The failed run read the cookies from this stream and wrote them back to it on exit, read them again
+        ydl_opts['cookiefile'].seek(0)
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        result.subtitles_error = download_subtitles(ydl, result.info, result.subtitle_tracks, progress)
+
+
+def download_subtitles(ydl, info: dict, tracks: dict[str, bool], progress: DownloadProgress | None) -> str | None:
+    """The subtitles pass: write the tracks and nothing else; returns the error of a failed pass, never raises"""
+    if not tracks:
+        return None
+    ydl.params.update(
+        {
+            'skip_download': True,
+            'writesubtitles': True,
+            'writeautomaticsub': True,
+            'subtitleslangs': subtitles.subtitleslangs_option(tracks),
+            'subtitlesformat': 'vtt/best',
+        }
+    )
+    if progress is not None:
+        progress.start_subtitles()
+    try:
+        ydl.process_ie_result(info, download=True)
+    except Exception as e:
+        error = classify_error(e)['error']
+        ydl.params['logger'].warning('Subtitles failed: %s', error)
+        return error
+    return None
 
 
 def requested_filepaths(info: dict) -> list[str]:
