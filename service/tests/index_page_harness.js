@@ -271,6 +271,24 @@ const EVIL_MEDIA = '"><img src=x onerror=alert(1)>.mp4';
         listeners['status:click']({ target: { dataset: { showTranscript: 'Some_video-abc.transcript.md' } } });
         await flush();
         await flush();
+    } else if (scenario === 'job-failed' || scenario === 'job-failed-with-files') {
+        window.location.pathname = `/jobs/${jobId}`;
+        const job = {
+            status: 'failed', download_id: jobId, extractor: 'Youtube', error: 'unable to download video data: HTTP Error 403: <Forbidden>',
+            error_code: 'network', artifacts: [], deleted_files: [], created_at: '2026-10-01T10:00:00+00:00',
+            updated_at: '2026-10-01T10:01:00+00:00',
+        };
+        if (scenario === 'job-failed-with-files') {
+            const completed = completedJob(jobId);
+            Object.assign(job, {
+                title: completed.title, uploader: 'jawed', duration: 19,
+                artifacts: completed.artifacts.filter((a) => a.kind !== 'media'), deleted_files: completed.deleted_files,
+            });
+        }
+        fetchResponse = json(200, job);
+        eval(source);
+        listeners['window:load']();
+        await flush();
     } else if (scenario === 'job-not-found') {
         window.location.pathname = `/jobs/${jobId}`;
         fetchResponse = json(404, { detail: 'Download not found' });

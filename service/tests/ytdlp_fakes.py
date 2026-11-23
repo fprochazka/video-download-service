@@ -1,9 +1,12 @@
 """Test doubles for yt-dlp, shared by conftest and the tests"""
 
+import io
 import json
 import sys
 from pathlib import Path
 
+from yt_dlp.networking import Response
+from yt_dlp.networking.exceptions import HTTPError
 from yt_dlp.utils import DownloadError, ExtractorError
 
 
@@ -72,6 +75,17 @@ def raise_like_ytdlp(exc: Exception):
         if not (exc_info and exc_info[0]):
             exc_info = sys.exc_info()
         raise DownloadError(f'\x1b[0;31mERROR:\x1b[0m {error}', exc_info) from None
+
+
+def media_refused(status: int = 403, reason: str = 'Forbidden'):
+    """Raise what yt-dlp's http downloader raises when the server refuses the media, it does not retry a 4xx"""
+    response = Response(
+        io.BytesIO(b''), 'https://media.example.com/videoplayback?id=1', {}, status=status, reason=reason
+    )
+    try:
+        raise HTTPError(response)
+    except HTTPError as error:
+        raise DownloadError(f'\x1b[0;31mERROR:\x1b[0m unable to download video data: {error}', sys.exc_info()) from None
 
 
 def extractor_error_caused_by(cause: Exception, message: str) -> ExtractorError:

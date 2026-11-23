@@ -11,6 +11,7 @@ from yt_dlp.utils import ExtractorError, PostProcessingError
 from tests.ytdlp_fakes import (
     FakeYoutubeDL,
     extractor_error_caused_by,
+    media_refused,
     raise_like_ytdlp,
     read_metadata,
     write_media,
@@ -696,6 +697,77 @@ def test_youtube_cookies_retry_fetches_subtitles_with_the_cookies(client, downlo
     first, second = FakeYoutubeDL.instances
     assert first.processed == []
     assert [p.get('skip_download') for p in second.processed] == [None, True]
+
+
+def refuse_media(ydl, info):
+    write_media(ydl.params, 'Czech_Video-abc.f399.mp4.part')
+    media_refused()
+
+
+def test_failed_media_keeps_the_subtitles_and_details(client, downloads_dir, caplog):
+    FakeYoutubeDL.behaviour = youtube_video
+    FakeYoutubeDL.download_behaviour = refuse_media
+    FakeYoutubeDL.subtitles_behaviour = write_requested_subtitles
+
+    download_id = client.post('/download', data={'url': VIDEO_URL}).json()['download_id']
+
+    metadata = read_metadata(downloads_dir, download_id)
+    assert metadata['status'] == 'failed'
+    assert metadata['error'] == 'unable to download video data: HTTP Error 403: Forbidden'
+    assert metadata['error_type'] == 'HTTPError'
+    assert metadata['files'] == []
+    assert metadata['title'] == 'Czech Video'
+    assert metadata['subtitles_error'] is None
+    assert metadata['progress'] is None
+    assert [(a['name'], a['kind']) for a in metadata['artifacts']] == [
+        ('Czech_Video-abc.cs-orig.vtt', 'subtitle'),
+        ('Czech_Video-abc.en.vtt', 'subtitle'),
+        ('info.json', 'info'),
+    ]
+    # The subtitles come from the extraction of the failed run, nothing is extracted again
+    first, subtitles_run = FakeYoutubeDL.instances
+    assert first.calls == [(VIDEO_URL, False)]
+    assert subtitles_run.calls == []
+    assert [p.get('skip_download') for p in subtitles_run.processed] == [True]
+    assert any(download_id in r.getMessage() and 'HTTP Error 403' in r.getMessage() for r in caplog.records)
+
+    status = client.get(f'/status/{download_id}').json()
+    assert status['status'] == 'failed'
+    assert [a['kind'] for a in status['artifacts']] == ['subtitle', 'subtitle', 'info']
+    assert client.get(f'/downloads/{download_id}/Czech_Video-abc.en.vtt').content == b'WEBVTT en'
+    assert client.get(f'/downloads/{download_id}/info.json').json()['title'] == 'Czech Video'
+    assert client.delete(f'/downloads/{download_id}/info.json').status_code == 200
+
+
+def test_failed_media_with_failed_subtitles_keeps_the_details(client, downloads_dir):
+    def failing_subtitles(params, info):
+        raise_like_ytdlp(ExtractorError("Unable to download video subtitles for 'en': HTTP Error 429"))
+
+    FakeYoutubeDL.behaviour = youtube_video
+    FakeYoutubeDL.download_behaviour = refuse_media
+    FakeYoutubeDL.subtitles_behaviour = failing_subtitles
+
+    download_id = client.post('/download', data={'url': VIDEO_URL}).json()['download_id']
+
+    metadata = read_metadata(downloads_dir, download_id)
+    assert metadata['status'] == 'failed'
+    assert 'HTTP Error 403' in metadata['error']
+    assert 'HTTP Error 429' in metadata['subtitles_error']
+    assert [a['kind'] for a in metadata['artifacts']] == ['info']
+
+
+def test_failed_media_of_a_site_without_subtitles_keeps_the_details(client, downloads_dir):
+    FakeYoutubeDL.behaviour = lambda opts, url: {'id': 'ABC123', 'title': 'A post'}
+    FakeYoutubeDL.download_behaviour = lambda ydl, info: media_refused()
+    FakeYoutubeDL.subtitles_behaviour = lambda params, info: pytest.fail('no subtitles to fetch')
+
+    download_id = client.post('/download', data={'url': 'https://www.instagram.com/p/ABC123/'}).json()['download_id']
+
+    metadata = read_metadata(downloads_dir, download_id)
+    assert metadata['status'] == 'failed'
+    assert metadata['title'] == 'A post'
+    assert [a['kind'] for a in metadata['artifacts']] == ['info']
+    assert len(FakeYoutubeDL.instances) == 1
 
 
 def test_legacy_job_lists_its_media_as_artifacts(client, downloads_dir):
